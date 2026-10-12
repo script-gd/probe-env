@@ -1,0 +1,9 @@
+build/
+tools/
+fixture/obj/
+fixture/compiler-cache/
+fixture/*.so
+fixture/*.dylib
+godot/.godot/
+godot/bin/
+*.zip

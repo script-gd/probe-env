@@ -1,0 +1,46 @@
+name: Native ARM64 TinyCC
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04-arm
+            asset: Godot_v4.5.2-stable_linux.arm64.zip
+            binary: Godot_v4.5.2-stable_linux.arm64
+          - os: macos-15
+            asset: Godot_v4.5.2-stable_macos.universal.zip
+            binary: Godot.app/Contents/MacOS/Godot
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native architecture
+        run: |
+          uname -a
+          test "$(uname -m)" = aarch64 || test "$(uname -m)" = arm64
+      - name: Download pinned Godot
+        env:
+          ASSET: ${{ matrix.asset }}
+          BINARY: ${{ matrix.binary }}
+        run: |
+          mkdir -p tools
+          curl -fL --retry 3 "https://github.com/godotengine/godot-builds/releases/download/4.5.2-stable/$ASSET" -o tools/godot.zip
+          unzip -q tools/godot.zip -d tools
+          chmod +x "tools/$BINARY"
+          echo "GODOT_BIN=$PWD/tools/$BINARY" >> "$GITHUB_ENV"
+      - name: Build and run full generated C project
+        run: bash scripts/probe.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidence-${{ matrix.os }}
+          path: |
+            build/*.log
+            build/tcc/config.h
+            godot/bin/
