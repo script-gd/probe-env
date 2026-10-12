@@ -7,7 +7,7 @@ static void diagnostic(void *opaque, const char *message) {
     fprintf(stderr, "libtcc: %s\n", message);
 }
 
-/* Mirror TinyCcCompiler.compileLocked, without copying the Java application. */
+/* Exercise libtcc directly, without gdcc's Java registry or object-cache pipeline. */
 int main(int argc, char **argv) {
     if (argc < 6) return 2;
     TCCState *s = tcc_new();
