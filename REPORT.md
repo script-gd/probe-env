@@ -8,16 +8,24 @@ API and Java 25 FFM drivers both produce extensions that pass the real Godot
 runtime assertions. Coroutine thread isolation, repeated shared-library unload,
 and executable HRX thunks also pass after the fixes below.
 
-This establishes feasibility, not production readiness of gdcc's Java backend.
-The probes use direct `TCC_OUTPUT_DLL` compilation of all C files in one state.
-The current gdcc backend instead compiles each translation unit to an object,
-maintains an object cache, and links objects in a fresh state. That pipeline,
-bundle installation, and the full script suite are **not validated here**.
+The extended suite now also validates gdcc's per-TU object-cache and relinking
+protocol in an independent Java FFM driver: one fresh `TCC_OUTPUT_OBJ` state per
+miss, followed by a fresh `TCC_OUTPUT_DLL` state consuming cached objects. It
+builds content-distinct reload images from those same cached runtime objects and
+tests real `dlclose` / `dlopen` with retained HRX Callables.
 
-Validated source revision: `6046d2594dfb02e41dce28cccf39117f51a2250e`.
-Both jobs in [run 38277297631](https://github.com/script-gd/probe-env/actions/runs/38277297631)
-completed successfully. The workflow's architecture check excludes x86_64;
-these results do not use QEMU or Rosetta.
+This establishes feasibility, not production readiness of gdcc's Java backend.
+The full gdcc Java application, bundle installation, and full script suite are
+**not validated here**. Godot lifecycle simulation is distinguished below from
+an actual editor-driven reload of registered extension classes.
+
+Extended-suite validated source revision: `c0d6386e5627e80b59360d3414071f8bfe31c40e`,
+[run 38292874035](https://github.com/script-gd/probe-env/actions/runs/38292874035).
+Both native ARM64 jobs completed successfully. The baseline fixes were validated
+at `6046d2594dfb02e41dce28cccf39117f51a2250e` in
+[run 38277297631](https://github.com/script-gd/probe-env/actions/runs/38277297631).
+The workflow's architecture check excludes x86_64; these native CI results do not
+use QEMU or Rosetta. The extended full script also passed locally on Linux x86_64.
 
 ## Inputs and Provenance
 
@@ -91,12 +99,17 @@ recorded output and the JVM crash report establish the failures described here.
 | Flat-namespace FFM negative test | Not applicable | Exit 134; native SIGBUS recorded by JVM |
 | Raw TinyCC cache builtin negative test | Not run | Exit 132, illegal instruction |
 
+The extended run additionally passes `CACHE_SUITE_PASS`, all eight
+`CACHE_GODOT_PASS` rounds, `RELOAD_PASS`, and `RELOAD_NEGATIVE_CONTROL_PASS` on
+both platforms. The following sections describe those checks and their scope.
+
 The macOS JVM crash report records macOS 15.7.9 / Darwin 24.6.0 and
 Temurin `25.0.4.1+1-LTS` (`bsd-aarch64`). Configure resolves headers through the
 Xcode 16.4 SDK. These are observed runner details, not a guaranteed minimum
 deployment version.
 
-Godot runs twice per platform, once for each compiler driver. Each run creates
+The baseline runs Godot twice per platform, once for each compiler driver; the
+extended suite adds eight object-linked outputs. Each run creates
 the generated class, exercises integer/string/boolean Variant marshalling and
 formatting, checks `value=42`, `value=ARM64`, and `value=true`, then frees the
 instance. Its successful tail is:
@@ -113,6 +126,109 @@ reject any `PT_TLS` segment. The loader has its own nonzero compiler-generated
 TLS sentinel and checks it is unchanged after calls. The two worker threads
 rendezvous while their coroutines are running, so a process-global replacement
 for coroutine TLS would fail rather than accidentally pass sequential tests.
+
+## Object Cache and Relinking
+
+`probes/CacheCompile.java` reproduces the inspected `TinyCcCompiler` /
+`TinyCcObjCache` protocol without copying or invoking gdcc's application:
+
+- A fresh compiler state compiles each missed TU with `TCC_OUTPUT_OBJ` and
+  `-std=c11`; another fresh state links ordered `.o` inputs with
+  `TCC_OUTPUT_DLL`, without include paths. Every state is deleted before its
+  strings/diagnostic-upcall arena closes, on success and failure.
+- The v2 key document includes target, ordered absolute include paths and sorted
+  whole-tree hashes, absolute TU path/content, bundle-version content, and sorted
+  TU-adjacent headers. Sections use big-endian 64-bit length prefixes and keys
+  are SHA-256 truncated to 16 bytes, as in gdcc.
+- This reproduction synthesizes its bundle VERSION from the platform and actual
+  libtcc binary SHA-256. It does not claim interoperability with a shipped gdcc
+  bundle/cache. All source changes for the tests occur in a private fixture copy.
+- Misses compile into same-directory unique `.tmp-*.o` files, then publish only
+  with `ATOMIC_MOVE` / `REPLACE_EXISTING`. Rounds assert no leftover temporaries
+  and that state deletion counts match creation counts.
+- A rejected cached object on the first link attempt is evicted and recompiled.
+  The failed link state is discarded, its rejection diagnostic is removed, and
+  the retry uses a new state. A second rejection fails without another heal.
+
+Both ARM64 jobs assert exactly the following results, not just process success:
+
+| Round | Hits / misses | OBJ / DLL states | Expected result |
+| --- | --- | --- | --- |
+| Cold cache | 0 / 5 | 5 / 1 | Success |
+| Warm cache | 5 / 0 | 0 / 1 | Success, no TU recompiled |
+| One TU changed | 4 / 1 | 1 / 1 | Success, old content-addressed entry retained |
+| TU-adjacent header added | 4 / 1 | 1 / 1 | Success |
+| Include-tree header added | 0 / 5 | 5 / 1 | Success |
+| One cached ELF object's endian byte corrupted | 4 / 1 | 1 / 2 | Success after one heal |
+| Two cached objects corrupted | 4 / 1 | 1 / 2 | Failure at the retry, no second heal |
+| Following round | 4 / 1 | 1 / 2 | Success, repairs remaining poisoned entry |
+| Invalid C input | 0 / 1 | 1 / 0 | Failure with diagnostic upcall |
+| Restored input | 5 / 0 | 0 / 1 | Success in the same JVM |
+| Each reload image | 2 / 1 | 1 / 1 | Cached HRX/binding objects plus one generation TU |
+
+Each emitted object is inspected for ELF64, little-endian `ET_REL`, and machine
+183 (`EM_AARCH64`) on ARM64. This includes **macOS** objects: TinyCC emits ELF
+intermediates there, reads them back through its ELF object reader, and writes a
+Mach-O final dylib. All eight successful fixture outputs are separately loaded
+and run in real Godot. The invalid-C and corrupted-object tests invoke the FFM
+diagnostic upcall (six calls observed per job), closing the earlier error-path
+coverage gap. Key-only assertions also check VERSION, target, and include-order
+invalidation.
+
+## Real Cross-DSO Reload
+
+The minimal lifecycle host in `probes/hrx/reload_host.c` is based on Godot
+`4.5.2-stable` source, not on guesses about loader behavior:
+
+- [gdextension_manager.cpp](https://github.com/godotengine/godot/blob/4.5.2-stable/core/extension/gdextension_manager.cpp):
+  `reload_extension`, `_load_extension_internal`, `_unload_extension_internal`,
+  and token-based `track_instance_binding`.
+- [gdextension.cpp](https://github.com/godotengine/godot/blob/4.5.2-stable/core/extension/gdextension.cpp):
+  `prepare_reload`, `clear_instance_bindings`, `close_library`, and `finish_reload`.
+- [object.cpp](https://github.com/godotengine/godot/blob/4.5.2-stable/core/object/object.cpp):
+  first-token-match `get_instance_binding` and first-match-removal
+  `free_instance_binding`, reproduced by the existing fake engine.
+
+The sequence is retain surviving Callable state, deinitialize levels down to
+CORE, clear extension-token bindings, `dlclose`, `dlopen` the next generation,
+initialize from its minimum SCENE level, then use the retained state. The entry
+uses the real `GDExtensionInitialization` callback ABI. Persistent engine heap,
+binding table and Callable objects live only in the host; each DSO gets its own
+image-local Godot interface table and HRX runtime state. No image-reset test hook
+is used. Content-distinct paths avoid conflating a new generation with a
+path-cached library.
+
+The host verifies:
+
+- The fixed anchor token is different from the extension token. Clearing normal
+  extension bindings keeps the host-owned hub; anchor free/reference callbacks
+  are NULL, so no unloaded image callback is retained there.
+- Old generations really leave the loader: `dlclose` succeeds and `RTLD_NOLOAD`
+  reports absence. The unload witness also has a positive check while each image
+  is resident, to rule out a broken NOLOAD lookup always returning NULL.
+- During the image gap, retained call/validity/argument-count thunks remain safe
+  and fail closed. An attempted call reports `INVALID_METHOD` without executing
+  a stale implementation.
+- Generation 2 adopts the same hub and capture block, keeps all four thunk
+  pointers and the page's byte snapshot unchanged, and executes generation-2
+  code on the generation-1 capture. A removed identity remains invalid.
+- Generation 2 destroys a separate generation-1 capture while generation 1 is
+  still unloaded. A fresh generation-2 capture is also reclaimed by its live
+  sweeper.
+- Freeing the final retained Callable after generation 2 unloads queues its spec
+  without jumping into unloaded code. The next compatible load destroys the
+  pending capture and returns tracked heap allocations to the post-init
+  hub/intern-table baseline, with no capture leaks in this scenario.
+
+`RELOAD_PASS` requires all of these assertions. A separate generation-2 negative
+control has no rebind entries: the same host must exit **1** with
+`FAIL matching identity must rebind compatibly`. This exact status/message gate
+is stronger than merely requiring any crash/nonzero result.
+
+The original `OK thunkpage` test is retained as an in-process sanity probe; the
+new test uses actual separate shared-library images built by the OBJ/cache/link
+driver. It remains a **native lifecycle simulation**, not a claim that Godot's
+full editor class/property/scene reload machinery was exercised.
 
 ## Required Fixes
 
@@ -164,7 +280,8 @@ The pinned TinyCC Makefile builds `libtcc.dylib` with `-flat_namespace`. The C
 driver successfully compiles the fixture with that library, but the Java FFM
 driver crashes on its first translation unit inside `preprocess_start+0x53c`.
 
-The latest artifact establishes a concrete symbol collision, not just a theory:
+The baseline run `38277297631` artifact establishes a concrete symbol collision,
+not just a theory:
 
 ```text
 dyld[1639]: <libtcc.dylib/bind#31> -> 0x1a4cf5544 (Heimdal/_parse_flags)
@@ -229,12 +346,12 @@ At the inspected source reference, integration requires:
 7. Update test bundle discovery and native-library filename checks, and run the
    real `TinyCcCompiler` FFM tests on both new hosts. Validate fresh object builds,
    cache hits, cache rejection/rebuild, diagnostics, and final Godot execution.
-8. Validate the macOS intermediate-object path specifically:
+8. Keep the macOS intermediate-object path covered by production tests:
    `tcc_set_output_type(TCC_OUTPUT_OBJ)` forces ELF, and `tcc_output_file` returns
    through `elf_output_obj` before reaching `macho_output_file`. Final
-   `TCC_OUTPUT_DLL` uses the Mach-O writer. No probe compiles or relinks an
-   intermediate object, so gdcc's object cache and fresh-state relinking remain
-   untested on this path.
+   `TCC_OUTPUT_DLL` uses the Mach-O writer. The standalone suite now validates
+   this path, including cached objects and rejection/retry; the actual gdcc
+   application's cache integration still needs its own native tests.
 9. Discover or allow overriding the macOS SDK at runtime. Configure embedded an
    absolute Xcode SDK include directory on this runner; shipping that path as-is
    would not make a portable bundle. Define deployment/signing policy separately.
@@ -252,6 +369,8 @@ own end-to-end tests. Removing only the supported-platform guard is insufficient
 | `3c80af0` | [38271249096](https://github.com/script-gd/probe-env/actions/runs/38271249096) | Linux passes; macOS harness hits Bash 3.2 empty-array/nounset behavior |
 | `efbb952` | [38275927143](https://github.com/script-gd/probe-env/actions/runs/38275927143) | Linux passes; macOS FFM exposes flat-namespace SIGBUS |
 | `6046d25` | [38277297631](https://github.com/script-gd/probe-env/actions/runs/38277297631) | Both native platforms pass all positive/negative checks |
+| `888840f` | [38291554463](https://github.com/script-gd/probe-env/actions/runs/38291554463) | Both platforms pass object-cache/relink rounds, eight Godot outputs, real cross-DSO reload and negative control |
+| `c0d6386` | [38292874035](https://github.com/script-gd/probe-env/actions/runs/38292874035) | Both platforms pass again with positive NOLOAD witnesses and stronger anchor-takeover checks |
 
 The macOS Bash issue was resolved by passing `-ldl` on both platforms rather
 than expanding an empty array under `set -u`; the coroutine rendezvous uses
@@ -260,7 +379,10 @@ mutex/condition-variable APIs rather than macOS-unsupported `pthread_barrier`.
 The workflow uploads `evidence-ubuntu-24.04-arm` and `evidence-macos-15`.
 Important files are `build/probe.log`, `godot.log`, `godot-ffm.log`, `reload.log`,
 `tls-negative.log`, `coroutine-segments.log` (Linux), `ffm-flat.log`,
-`namespace-{flat,twolevel}.log` (macOS), and `hs_err_pid1639.log` (this run).
+`namespace-{flat,twolevel}.log` (macOS), and `hs_err_pid*.log` (`1639` in the
+baseline run). Extended evidence includes `object-cache.log`,
+`object-formats.log`, `godot-cache-*.log`, `hrx-reload.log`, and
+`hrx-reload-negative.log`, plus the cached ELF objects and linked reload images.
 HRX success and negative-test exit codes appear in `probe.log`; empty crash
 stdout logs alone do not establish a result. Native libraries and TinyCC
 configuration are also uploaded. Artifacts are subject to GitHub retention.
@@ -276,8 +398,8 @@ To rerun the native matrix or retrieve the recorded evidence:
 
 ```bash
 gh workflow run arm64.yml --ref main
-gh run view 38277297631
-gh run download 38277297631 --dir build/evidence-38277297631
+gh run view 38292874035
+gh run download 38292874035 --dir build/evidence-38292874035
 ```
 
 The script intentionally crashes several negative-test subprocesses. The
@@ -290,12 +412,20 @@ remain mandatory on a future TinyCC, JVM, or OS version.
 - One complete generated script project was tested, not the entire gdcc suite.
 - Coroutine behavior is tested directly through minicoro, not a generated
   GDScript `await` program; migration of a coroutine between threads is untested.
-- HRX generation changes use gdcc's fake-engine probe in one executable, not a
-  real Godot editor reload that unloads one DSO and loads a different generation.
+- HRX now uses real separate DSOs, but the persistent engine is a minimal fake.
+  Registered-class recreation, property snapshots/restoration, scene reload,
+  and editor-managed `GDExtensionManager` reload remain outside this test.
 - The 1100-round unload test exercises the coroutine DSO and TLS key cleanup;
   it does not certify every gdcc/Godot hot-reload lifetime path.
-- FFM registers a diagnostic upcall but no deliberate invalid-C input was used
-  to exercise its error path. Production object-cache compilation is untested.
+- FFM diagnostic upcalls and object-cache compilation/relinking are exercised
+  independently; the actual gdcc Java application, cache-root fallback,
+  atomic-publication failure degradation, competing cache writers, cancellation,
+  and deliberately broken diagnostic callbacks remain untested.
+- Each cache suite uses a fresh private workspace; warm rounds run in the same
+  JVM. This does not establish cross-process or distributed cache correctness.
+- The removed-identity reload case has NULL captures, so it does not certify
+  disposal of an incompatible nonempty capture layout. The persistent hub and
+  thunk mapping intentionally outlive individual images.
 - Successful RW-to-RX thunk publication on the runner does not cover every
   hardened-runtime, entitlement, sandbox, or signing configuration. Keep HRX
   failure paths fail-closed.
