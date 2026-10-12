@@ -51,3 +51,6 @@ jobs:
             build/tcc/libtcc.*
             hs_err_pid*.log
             godot/bin/
+            build/libreload_*
+            build/cache-suite.*/tcc-obj/*.o
+            build/cache-suite.*/outputs/*

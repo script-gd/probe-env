@@ -82,3 +82,4 @@ build/tcc/tcc -Bbuild/tcc -std=c11 -DGDCC_HRX_TEST_HOOKS \
     fixture/include/gdcc/gdcc_hrx.c fixture/include/godot/godot_binding.c \
     -o build/hrx
 build/hrx
+bash scripts/cache-reload.sh
