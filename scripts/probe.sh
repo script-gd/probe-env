@@ -29,3 +29,14 @@ grep -q '^GDCC_PROJECT_PASS$' build/godot.log
 build/tcc/tcc -Bbuild/tcc -std=c11 -Ifixture/include/gdcc \
     probes/coroutine.c fixture/include/gdcc/minicoro.c -lpthread -o build/coroutine
 build/coroutine
+dlflags=()
+if [[ "$os" == Linux ]]; then dlflags=(-ldl); fi
+cc probes/load.c "${dlflags[@]}" -o build/load
+build/tcc/tcc -Bbuild/tcc -std=c11 -shared -Ifixture/include/gdcc \
+    probes/coroutine.c fixture/include/gdcc/minicoro.c -lpthread -o "build/libcoroutine.$suffix"
+build/load "$root/build/libcoroutine.$suffix"
+build/tcc/tcc -Bbuild/tcc -std=c11 -DGDCC_HRX_TEST_HOOKS \
+    -Ifixture/include/gdcc -Ifixture/include/godot probes/hrx.c \
+    fixture/include/gdcc/gdcc_hrx.c fixture/include/godot/godot_binding.c \
+    -o build/hrx
+build/hrx

@@ -19,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Verify native architecture
         run: |
           uname -a
@@ -36,7 +36,7 @@ jobs:
           echo "GODOT_BIN=$PWD/tools/$BINARY" >> "$GITHUB_ENV"
       - name: Build and run full generated C project
         run: bash scripts/probe.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: evidence-${{ matrix.os }}

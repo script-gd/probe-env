@@ -431,6 +431,10 @@ extern "C" {
 #ifndef MCO_THREAD_LOCAL
   #ifdef MCO_NO_MULTITHREAD
     #define MCO_THREAD_LOCAL
+  #elif defined(__TINYC__) && !defined(_WIN32)
+    /* TCC's ELF local-exec TLS is unsafe in DSOs; Mach-O has no TLV support. */
+    #define MCO_USE_PTHREAD_TLS
+    #define MCO_THREAD_LOCAL
   #else
     #ifdef thread_local
       #define MCO_THREAD_LOCAL thread_local
@@ -572,7 +576,27 @@ static MCO_FORCE_INLINE size_t _mco_align_forward(size_t addr, size_t align) {
 }
 
 /* Variable holding the current running coroutine per thread. */
+#ifdef MCO_USE_PTHREAD_TLS
+#include <pthread.h>
+#include <stdlib.h>
+static pthread_key_t mco_current_co_key;
+static pthread_once_t mco_current_co_once = PTHREAD_ONCE_INIT;
+static void _mco_create_tls_key(void) {
+  if(pthread_key_create(&mco_current_co_key, NULL) != 0) abort();
+}
+static mco_coro* _mco_get_current(void) {
+  if(pthread_once(&mco_current_co_once, _mco_create_tls_key) != 0) abort();
+  return (mco_coro*)pthread_getspecific(mco_current_co_key);
+}
+static void _mco_set_current(mco_coro* co) {
+  if(pthread_once(&mco_current_co_once, _mco_create_tls_key) != 0) abort();
+  if(pthread_setspecific(mco_current_co_key, co) != 0) abort();
+}
+#else
 static MCO_THREAD_LOCAL mco_coro* mco_current_co = NULL;
+static mco_coro* _mco_get_current(void) { return mco_current_co; }
+static void _mco_set_current(mco_coro* co) { mco_current_co = co; }
+#endif
 
 static MCO_FORCE_INLINE void _mco_prepare_jumpin(mco_coro* co) {
   /* Set the old coroutine to normal state and update it. */
@@ -583,7 +607,7 @@ static MCO_FORCE_INLINE void _mco_prepare_jumpin(mco_coro* co) {
     MCO_ASSERT(prev_co->state == MCO_RUNNING);
     prev_co->state = MCO_NORMAL;
   }
-  mco_current_co = co;
+  _mco_set_current(co);
 #ifdef _MCO_USE_ASAN
   if(prev_co) {
     void* bottom_old = NULL;
@@ -608,7 +632,7 @@ static MCO_FORCE_INLINE void _mco_prepare_jumpout(mco_coro* co) {
     /* MCO_ASSERT(prev_co->state == MCO_NORMAL); */
     prev_co->state = MCO_RUNNING;
   }
-  mco_current_co = prev_co;
+  _mco_set_current(prev_co);
 #ifdef _MCO_USE_ASAN
   void* bottom_old = NULL;
   size_t size_old = 0;
@@ -1207,7 +1231,7 @@ __asm__(
   "__mco_switch:\n"
 #else
   ".globl _mco_switch\n"
-  ".type _mco_switch #function\n"
+  ".type _mco_switch, %function\n"
   ".hidden _mco_switch\n"
   "_mco_switch:\n"
 #endif
@@ -1250,7 +1274,7 @@ __asm__(
   "__mco_wrap_main:\n"
 #else
   ".globl _mco_wrap_main\n"
-  ".type _mco_wrap_main #function\n"
+  ".type _mco_wrap_main, %function\n"
   ".hidden _mco_wrap_main\n"
   "_mco_wrap_main:\n"
 #endif
@@ -1948,11 +1972,11 @@ size_t mco_get_storage_size(mco_coro* co) {
 
 #ifdef MCO_NO_MULTITHREAD
 mco_coro* mco_running(void) {
-  return mco_current_co;
+  return _mco_get_current();
 }
 #else
 static MCO_NO_INLINE mco_coro* _mco_running(void) {
-  return mco_current_co;
+  return _mco_get_current();
 }
 mco_coro* mco_running(void) {
   /*

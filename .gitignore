@@ -7,3 +7,4 @@ fixture/*.dylib
 godot/.godot/
 godot/bin/
 *.zip
+godot/*.uid
