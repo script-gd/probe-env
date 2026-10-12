@@ -23,6 +23,8 @@ int main(void) {
     godot_initialize_interface(fake_get_proc_address);
     gdcc_hrx_test_reset_image_state(); // simulate a fresh DSO image arriving
     gdcc_hrx_initialize_core(NULL, (GDExtensionObjectPtr)&g_engine_marker, true, true, 0xEFu, NULL, 0);
+    CHECK(g_anchor_free_cb_was_null == 1, "anchor must not retain image-local free callback");
+    CHECK(g_anchor_reference_cb_was_null == 1, "anchor must not retain image-local reference callback");
     const int balance_base = g_mem_balance;
     godot_Callable cb_a = gdcc_hrx_create_lambda(NULL, 0, impl1, valid1, noop_destroy, 0, &IDENTITY_A, NULL);
     godot_Callable cb_b = gdcc_hrx_create_lambda(NULL, 0, impl1, valid1, noop_destroy, 0, &IDENTITY_B, NULL);
@@ -49,6 +51,7 @@ int main(void) {
 
     void *call_b = (void *)custom_b->call_func;
     gdcc_hrx_deinitialize();
+    CHECK(custom_a->is_valid_func(custom_a->userdata) == false, "unloaded generation must be invalid");
                         gdcc_hrx_test_reset_image_state(); // simulate a fresh DSO image arriving
                         gdcc_hrx_initialize_core(NULL, (GDExtensionObjectPtr)&g_engine_marker, true, true, 0xEFu, GEN2_TABLE, 1);
     CHECK((void *)custom_b->call_func == call_b,
@@ -58,6 +61,7 @@ int main(void) {
     CHECK(memcmp(snapshot, page, bundle_bytes) == 0,
             "the shared page bytes must be identical after a reload (never rewritten)");
     CHECK(custom_b->is_valid_func(custom_b->userdata) == true, "rebound spec must be valid");
+    CHECK(custom_a->is_valid_func(custom_a->userdata) == false, "missing identity must fail closed");
     custom_b->call_func(custom_b->userdata, NULL, 0, NULL, NULL);
     CHECK(g_impl_calls == 1, "rebound spec must run through the shared thunk");
 
@@ -70,6 +74,7 @@ int main(void) {
     godot_Callable_destroy(&cb_b);
     godot_Callable_destroy(&cb_d);
     CHECK(g_mem_balance == balance_base, "all specs must be reclaimed");
+    gdcc_hrx_deinitialize();
     printf("OK thunkpage\n");
     return 0;
 }

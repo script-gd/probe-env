@@ -34,9 +34,14 @@ jobs:
           unzip -q tools/godot.zip -d tools
           chmod +x "tools/$BINARY"
           echo "GODOT_BIN=$PWD/tools/$BINARY" >> "$GITHUB_ENV"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+          architecture: aarch64
       - name: Build and run full generated C project
         run: bash scripts/probe.sh
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: evidence-${{ matrix.os }}

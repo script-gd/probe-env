@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#define CHECK(x) do { if (!(x)) abort(); } while (0)
+#define CHECK(x) do { if (!(x)) { fprintf(stderr, "CHECK failed: %s:%d: %s\n", __FILE__, __LINE__, #x); abort(); } } while (0)
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ready = PTHREAD_COND_INITIALIZER;
 static int arrivals;
@@ -37,6 +37,7 @@ static void *worker(void *unused) {
 
 int main(void) {
     pthread_t threads[2];
+    arrivals = 0;
     for (int i = 0; i < 2; i++) CHECK(pthread_create(&threads[i], NULL, worker, NULL) == 0);
     for (int i = 0; i < 2; i++) CHECK(pthread_join(threads[i], NULL) == 0);
     puts("COROUTINE_TLS_PASS");

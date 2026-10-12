@@ -455,10 +455,9 @@ extern "C" {
   #endif
 #endif
 
-/* gdcc patch guard: under tcc the __thread branch above must win; degrading to
-   MCO_NO_MULTITHREAD is a silent thread-safety regression, so fail the compile instead. */
+/* Never silently degrade the native TLS or pthread-key path to global state. */
 #if defined(__TINYC__) && defined(MCO_NO_MULTITHREAD)
-  #error "minicoro requires __thread TLS under tcc; MCO_NO_MULTITHREAD fallback is not supported"
+  #error "minicoro requires thread-local state under tcc; MCO_NO_MULTITHREAD is not supported"
 #endif
 
 #ifndef MCO_FORCE_INLINE
@@ -581,8 +580,15 @@ static MCO_FORCE_INLINE size_t _mco_align_forward(size_t addr, size_t align) {
 #include <stdlib.h>
 static pthread_key_t mco_current_co_key;
 static pthread_once_t mco_current_co_once = PTHREAD_ONCE_INIT;
+static int mco_current_co_key_initialized;
 static void _mco_create_tls_key(void) {
   if(pthread_key_create(&mco_current_co_key, NULL) != 0) abort();
+  mco_current_co_key_initialized = 1;
+}
+/* The host must drain coroutines and stop calling this image before unloading it. */
+/* glibc may macro-erase __attribute__ when TCC does not advertise __GNUC__. */
+__attribute((destructor)) static void _mco_delete_tls_key(void) {
+  if(mco_current_co_key_initialized) pthread_key_delete(mco_current_co_key);
 }
 static mco_coro* _mco_get_current(void) {
   if(pthread_once(&mco_current_co_once, _mco_create_tls_key) != 0) abort();
