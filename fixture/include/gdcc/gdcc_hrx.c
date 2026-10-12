@@ -20,6 +20,9 @@ static GDExtensionClassLibraryPtr class_library = NULL;
 #include "gdcc_hrx.h"
 
 #include <string.h>
+#if defined(__APPLE__) && defined(__aarch64__)
+#include <libkern/OSCacheControl.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -473,7 +476,10 @@ static size_t gdcc_hrx_os_page_size(void) {
 
 static void gdcc_hrx_flush_icache(void *addr, size_t size) {
 #if defined(__aarch64__)
-    #if defined(__TINYC__)
+    #if defined(__APPLE__)
+    // Darwin does not expose CTR_EL0, which tcc's generic builtin reads.
+    sys_icache_invalidate(addr, size);
+    #elif defined(__TINYC__)
     // tcc has no __builtin___clear_cache; its aarch64 runtime provides __arm64_clear_cache.
     __arm64_clear_cache((char *)addr, (char *)addr + size);
     #else

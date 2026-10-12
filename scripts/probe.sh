@@ -26,11 +26,26 @@ cp godot/extension_list.cfg godot/.godot/extension_list.cfg
 "$GODOT_BIN" --headless --path godot --script run.gd > build/godot.log 2>&1
 cat build/godot.log
 grep -q '^GDCC_PROJECT_PASS$' build/godot.log
-java --enable-native-access=ALL-UNNAMED probes/Compile.java \
+compile_ffm() {
+    java --enable-native-access=ALL-UNNAMED probes/Compile.java \
     "$root/build/tcc" "$root/fixture/include/gdcc" "$root/fixture/include/godot" \
     "$root/godot/bin/libprobe.$suffix" "$root/fixture/entry.c" \
     "$root/fixture/include/godot/godot_binding.c" "$root/fixture/include/gdcc/minicoro.c" \
     "$root/fixture/include/gdcc/gdcc_coroutine.c" "$root/fixture/include/gdcc/gdcc_hrx.c"
+}
+if [[ "$os" == Darwin ]]; then
+    otool -hv build/tcc/libtcc.dylib > build/namespace-flat.log
+    set +e
+    DYLD_PRINT_BINDINGS=1 compile_ffm > build/ffm-flat.log 2>&1
+    flat_status=$?
+    set -e
+    echo "FLAT_NAMESPACE_FFM_STATUS::$flat_status"
+    test "$flat_status" -ne 0
+    # Command-line LDFLAGS overrides upstream's += -flat_namespace for the host dylib.
+    make -C build/tcc -B -j2 LDFLAGS=-Wl,-twolevel_namespace tcc libtcc.dylib
+    otool -hv build/tcc/libtcc.dylib > build/namespace-twolevel.log
+fi
+compile_ffm
 "$GODOT_BIN" --headless --path godot --script run.gd > build/godot-ffm.log 2>&1
 cat build/godot-ffm.log
 grep -q '^GDCC_PROJECT_PASS$' build/godot-ffm.log
@@ -53,6 +68,15 @@ tls_status=$?
 set -e
 echo "UNPATCHED_TLS_STATUS::$tls_status"
 test "$tls_status" -ne 0
+if [[ "$os" == Darwin ]]; then
+    build/tcc/tcc -Bbuild/tcc -std=c11 probes/cache_negative.c -o build/cache_negative
+    set +e
+    build/cache_negative > build/cache-negative.log 2>&1
+    cache_status=$?
+    set -e
+    echo "RAW_CACHE_STATUS::$cache_status"
+    test "$cache_status" -ne 0
+fi
 build/tcc/tcc -Bbuild/tcc -std=c11 -DGDCC_HRX_TEST_HOOKS \
     -Ifixture/include/gdcc -Ifixture/include/godot probes/hrx.c \
     fixture/include/gdcc/gdcc_hrx.c fixture/include/godot/godot_binding.c \

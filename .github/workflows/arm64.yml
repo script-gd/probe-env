@@ -48,4 +48,6 @@ jobs:
           path: |
             build/*.log
             build/tcc/config.h
+            build/tcc/libtcc.*
+            hs_err_pid*.log
             godot/bin/
