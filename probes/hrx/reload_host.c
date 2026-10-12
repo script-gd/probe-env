@@ -84,12 +84,13 @@ int main(int argc, char **argv) {
     }
     const char *path_gen1 = argv[1];
     const char *path_gen2 = argv[2];
-    const size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+    const long page_size_result = sysconf(_SC_PAGESIZE);
+    CHECK(page_size_result > 0, "page size lookup failed");
+    const size_t page_size = (size_t)page_size_result;
 
     reload_host_bridge bridge;
     bridge.engine_object = (GDExtensionObjectPtr)&g_engine_marker;
     bridge.get_proc_address = (GDExtensionInterfaceGetProcAddress)fake_get_proc_address;
-    bridge.generation_hint = 0;
     GDExtensionClassLibraryPtr extension_token = (GDExtensionClassLibraryPtr)&bridge;
 
     log_event("host-start");
@@ -97,6 +98,7 @@ int main(int argc, char **argv) {
     /* ---------------- load generation 1 ---------------- */
     void *hd1 = dlopen(path_gen1, RTLD_NOW | RTLD_LOCAL);
     CHECK(hd1 != NULL, "gen1 dlopen failed");
+    CHECK(dso_is_loaded(path_gen1), "NOLOAD must detect resident Gen1 before unload");
     reload_entry_fn entry1 = (reload_entry_fn)dlsym(hd1, "reload_generation_entry");
     reload_hub_fn hub_fn1 = (reload_hub_fn)dlsym(hd1, "reload_generation_hub");
     reload_thunk_offset_fn thunk_offset_fn1 =
@@ -172,7 +174,7 @@ int main(int argc, char **argv) {
 
     unsigned char snapshot[256];
     const unsigned bundle_bytes = bundle_bytes_fn1();
-    CHECK(bundle_bytes <= sizeof(snapshot), "snapshot buffer too small");
+    CHECK(bundle_bytes > 0 && bundle_bytes <= sizeof(snapshot), "invalid thunk snapshot size");
     memcpy(snapshot, page, bundle_bytes);
 
     /* gen1 code runs through the thunk on the host-owned capture */
@@ -182,8 +184,18 @@ int main(int argc, char **argv) {
     CHECK(err.error == GDEXTENSION_CALL_OK, "gen1 call must succeed");
     CHECK(cap1->calls == 1 && cap1->last_generation == 1, "gen1 implementation must run");
 
+    /* A normal extension-token binding exists while Gen1 is still initialized. */
+    const GDExtensionInstanceBindingCallbacks dummy = {
+        .create_callback = reload_dummy_create,
+        .free_callback = NULL,
+        .reference_callback = NULL,
+    };
+    void *ext_slot = fake_get_binding(
+            (GDExtensionObjectPtr)&g_engine_marker, (void *)extension_token, &dummy);
+    CHECK(ext_slot == (void *)(uintptr_t)0xD00D, "extension-token binding not created");
+
     /* ---------------- prepare/retain ---------------- */
-    cm->refs++; /* the reload manager's retention of the surviving Callable */
+    cm->refs++; /* property/Variant retention is modeled by this reference */
     log_event("prepared-retained");
 
     /* ---------------- deinitialize generation 1 (down to CORE) ---------------- */
@@ -200,14 +212,6 @@ int main(int argc, char **argv) {
     CHECK(valid_flag == false && argc_value == 0, "argc must fail closed after deinitialize");
 
     /* ---------------- clear only extension-token bindings ---------------- */
-    const GDExtensionInstanceBindingCallbacks dummy = {
-        .create_callback = reload_dummy_create,
-        .free_callback = NULL,
-        .reference_callback = NULL,
-    };
-    void *ext_slot = fake_get_binding(
-            (GDExtensionObjectPtr)&g_engine_marker, (void *)extension_token, &dummy);
-    CHECK(ext_slot == (void *)(uintptr_t)0xD00D, "extension-token binding not created");
     fake_free_binding((GDExtensionObjectPtr)&g_engine_marker, (void *)extension_token);
     CHECK(fake_get_binding((GDExtensionObjectPtr)&g_engine_marker, (void *)extension_token, NULL) == NULL,
             "extension-token bindings must be cleared");
@@ -233,6 +237,7 @@ int main(int argc, char **argv) {
     /* ---------------- load generation 2 ---------------- */
     void *hd2 = dlopen(path_gen2, RTLD_NOW | RTLD_LOCAL);
     CHECK(hd2 != NULL, "gen2 dlopen failed");
+    CHECK(dso_is_loaded(path_gen2), "NOLOAD must detect resident Gen2 before unload");
     reload_entry_fn entry2 = (reload_entry_fn)dlsym(hd2, "reload_generation_entry");
     reload_hub_fn hub_fn2 = (reload_hub_fn)dlsym(hd2, "reload_generation_hub");
     reload_create_matching_fn create_matching2 =
@@ -253,8 +258,8 @@ int main(int argc, char **argv) {
     CHECK(cm->call_func == saved_call && cm->is_valid_func == saved_valid
                     && cm->free_func == saved_free && cm->argc_func == saved_argc,
             "retained callable must keep the same four callback pointers");
-    CHECK(g_anchor_free_cb_was_null == 1 && g_anchor_reference_cb_was_null == 1,
-            "anchor callbacks stay NULL across reload");
+    CHECK(g_create_callback_calls == 2,
+            "gen2 must adopt the existing anchor without another create callback");
     CHECK(spec_m->captures == (void *)cap1, "rebind must keep the Gen1 capture block");
     CHECK(spec_m->impl_ptr != NULL && spec_m->binding_state == GDCC_HRX_BOUND_COMPATIBLE,
             "matching identity must rebind compatibly");
@@ -271,6 +276,7 @@ int main(int argc, char **argv) {
     CHECK(live_observer.destroyed == 1 && live_observer.destroyed_generation == 2,
             "gen2 must destroy a Gen1 capture while Gen1 is still unloaded");
     CHECK(!dso_is_loaded(path_gen1), "compatible destruction must not reload Gen1");
+    log_event("gen2-destroyed-gen1-capture");
 
     /* removed identity remains fail-closed: invoke then release */
     memset(&err, 0, sizeof(err));
@@ -304,10 +310,12 @@ int main(int argc, char **argv) {
     fake_callable_custom_release(cm); /* refs 1 -> 0: free thunk queues the spec */
     CHECK(observer1.destroyed == 0, "no capture destroy without a live sweeper");
     CHECK(g_mem_balance > balance_base, "pending spec must survive until the next load");
+    log_event("pending-free-between-images");
 
     /* ---------------- next load reclaims the pending spec ---------------- */
     void *hd3 = dlopen(path_gen1, RTLD_NOW | RTLD_LOCAL);
     CHECK(hd3 != NULL, "reclaim-gen dlopen failed");
+    CHECK(dso_is_loaded(path_gen1), "NOLOAD must detect resident reclaim generation");
     reload_entry_fn entry3 = (reload_entry_fn)dlsym(hd3, "reload_generation_entry");
     CHECK(entry3 != NULL, "reclaim-gen entry missing");
     GDExtensionInitialization init3;
@@ -317,6 +325,7 @@ int main(int argc, char **argv) {
     CHECK(observer1.destroyed == 1 && observer1.destroyed_generation == 1,
             "pending spec must be reclaimed (destroyed) on the next load");
     CHECK(g_mem_balance == balance_base, "spec memory balance must return to post-init baseline");
+    log_event("pending-reclaimed");
 
     unload_extension_levels(&init3);
     CHECK(dlclose(hd3) == 0, "reclaim-gen dlclose failed");

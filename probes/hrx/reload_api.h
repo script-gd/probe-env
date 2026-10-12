@@ -7,7 +7,7 @@
  * data types plus the generation export declarations, so the same header can be
  * consumed by a normal `cc` translation unit and a TinyCC `-shared` build.
  *
- * Generation selection is a compile-time constant (`-DPROBE_GENERATION=<n>`);
+ * Generation selection is a compile-time constant (`PROBE_GENERATION`);
  * the two packages are content-distinct DSO images but share this layout.
  */
 
@@ -47,7 +47,6 @@ typedef struct reload_capture {
 typedef struct reload_host_bridge {
     GDExtensionObjectPtr engine_object;
     GDExtensionInterfaceGetProcAddress get_proc_address;
-    unsigned generation_hint;
 } reload_host_bridge;
 
 /* Real GDExtension entry shape: the host drives initialize/deinitialize at the

@@ -75,7 +75,7 @@ public class CacheCompile {
                 if (Files.isSymbolicLink(file) && Files.isDirectory(file))
                     throw new IOException("directory symlink in include tree: " + file);
                 if (!Files.isRegularFile(file)) continue;
-                section(digest, directory.relativize(file).toString().replace('\\', '/'));
+                section(digest, directory.relativize(file).toString().replace(java.io.File.separatorChar, '/'));
                 section(digest, Files.readAllBytes(file));
             }
         }
