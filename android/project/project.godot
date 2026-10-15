@@ -1,0 +1,13 @@
+config_version=5
+
+[application]
+
+config/name="probe-env Android Editor Probe"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/probe_runner/plugin.cfg")

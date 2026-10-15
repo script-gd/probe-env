@@ -1,0 +1,9 @@
+[configuration]
+
+entry_symbol = "gdextension_entry"
+compatibility_minimum = "4.5"
+
+[libraries]
+
+android.debug.arm64 = "res://bin/libprobe.so"
+android.debug.x86_64 = "res://bin/libprobe.so"

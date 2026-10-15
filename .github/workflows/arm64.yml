@@ -1,6 +1,7 @@
 name: Native ARM64 TinyCC
 on:
   push:
+    branches: [main]
   workflow_dispatch:
 permissions:
   contents: read

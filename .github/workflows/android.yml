@@ -1,0 +1,48 @@
+name: Android TinyCC
+on:
+  push:
+    branches: [research/android-arm64-tinycc]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, x86_64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: android-actions/setup-android@v3
+      - name: Install pinned NDK
+        run: sdkmanager 'ndk;28.1.13356709'
+      - name: Build Android-target libtcc and full generated project
+        env:
+          ABI: ${{ matrix.abi }}
+        run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.1.13356709" bash scripts/android-build.sh
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: APK_ABI=${{ matrix.abi }} LIBPROBE_SO=$PWD/build/android/${{ matrix.abi }}/libprobe.so bash scripts/android-editor.sh
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: android-${{ matrix.abi }}
+          path: |
+            build/android/**/*.log
+            build/android/**/*.txt
+            build/android/**/*.so
+            build/android/**/*.sha256
+            build/android/**/config.h
