@@ -31,11 +31,15 @@ adb shell rm -rf "$project"
 adb push "$root/android/project" /sdcard/probe-env
 adb logcat -c
 adb shell am start -S -n "$pkg/org.godotengine.editor.GodotEditor" \
-    --esa command_line_params "--headless,--editor,--path,$project,--rendering-method,gl_compatibility,--verbose" \
+    --esa command_line_params "--editor,--path,$project,--rendering-method,gl_compatibility,--verbose" \
     | tee "$out/am-start.txt"
 result=1
 for ((i=0; i<120; i++)); do
-    adb logcat -d > "$out/logcat.txt"
+    if adb logcat -d > "$out/logcat-next.txt"; then
+        mv "$out/logcat-next.txt" "$out/logcat.txt"
+    else
+        break
+    fi
     if grep -q 'ANDROID_EDITOR_RESULT::PASS' "$out/logcat.txt"; then result=0; break; fi
     if grep -Eq 'ANDROID_EDITOR_RESULT::FAIL|Fatal signal|FATAL EXCEPTION' "$out/logcat.txt"; then break; fi
     sleep 3
