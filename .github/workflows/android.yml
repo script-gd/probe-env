@@ -16,6 +16,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+          log-accepted-android-sdk-licenses: false
       - name: Install pinned NDK
         run: sdkmanager 'ndk;28.1.13356709'
       - name: Build Android-target libtcc and full generated project
