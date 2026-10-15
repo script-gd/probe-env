@@ -8,3 +8,4 @@ godot/.godot/
 godot/bin/
 *.zip
 godot/*.uid
+runtime-input/app/lib/native/

@@ -1,0 +1,22 @@
+{
+  "checkout_commit_at_snapshot": "3136c45182c4c327024ec677d150ba21e0588771",
+  "packaged_from": [
+    "build/classes/java/main",
+    "build/resources/main",
+    "build/tmp/jar/MANIFEST.MF"
+  ],
+  "jar_version_resource": "version=0.0.2\nbranch=feat/backend/tinycc\ncommit=457262e8\n",
+  "files": {
+    "GDCC-LICENSE": "62612be722b9fe65f81ad334180b2a590f968dd261ad94ab09f85fd00758e7ae",
+    "app/gdcc-0.0.2.jar": "b90b75f8351542dae019ee10121a87d847b849b306c8f57c78dbd3c0b06fcebf",
+    "app/lib/error_prone_annotations-2.41.0.jar": "a56e782b5b50811ac204073a355a21d915a2107fce13ec711331ad036f660fcc",
+    "app/lib/freemarker-2.3.34.jar": "9a9fb91cd64199232eb1ca9766148a5d30ef8944be5fac051018f96c70c8f6a3",
+    "app/lib/gdparser-0.6.0.jar": "e801d99fd521b9a34830de74628b768ed7f248569bdb70d7a9ccb14a0d5ed841",
+    "app/lib/gson-2.13.2.jar": "dd0ce1b55a3ed2080cb70f9c655850cda86c206862310009dcb5e5c95265a5e0",
+    "app/lib/jAstyle-1.3-module.jar": "6c4355451c3a91421a5c7bb1b632a93848a1095fa94c101c6e660de94c7fca8f",
+    "app/lib/picocli-4.7.7.jar": "f86e30fffd10d2b13b8caa8d4b237a7ee61f2ffccf5b1941de718b765d235bf8",
+    "app/lib/slf4j-api-2.0.17.jar": "7b751d952061954d5abfed7181c1f645d336091b679891591d63329c622eb832",
+    "app/lib/tree-sitter-0.26.3-module.jar": "ed71f610db06c63c148ad7e6aa0d2cbf142f5e1ef9620b41975e23f7a84d544e",
+    "windows-x86_64.tar.gz": "e0c136cc16b63b75002373db4bedd3dd7780af6be9176c8e8e79b298be4a3dc7"
+  }
+}

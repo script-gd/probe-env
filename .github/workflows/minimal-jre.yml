@@ -1,0 +1,65 @@
+name: Minimal gdcc JRE
+on:
+  push:
+    branches: [research/minimal-jre]
+    paths:
+      - '.github/workflows/minimal-jre.yml'
+      - 'scripts/minimal-jre.py'
+      - 'scripts/jre-native-bundle.sh'
+      - 'probes/GdccRuntimeProbe.java'
+      - 'runtime-input/**'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86_64
+            asset: linux.x86_64
+            binary: Godot_v4.5.2-stable_linux.x86_64
+            sha512: e3ce6194b6d4d2dcef5e5b5136752c084d9d8b9071c10bc2d2011b947ec7439a257c8d23c541cb30699f16d9edea6dff36e6e84d2bec14a8fe9b4e9aacbe5a8d
+          - os: macos-15
+            platform: macos-aarch64
+            asset: macos.universal
+            binary: Godot.app/Contents/MacOS/Godot
+            sha512: 0b309feb20b5d6169abbb3a01563dbec0779c2172308c91f0183d0b141b15b5a6a072b388ae2dfc762f7c04da8ae2da9e1e7475d23bc3d24b1824aded2b5d7c0
+          - os: windows-2025
+            platform: windows-x86_64
+            asset: win64.exe
+            binary: Godot_v4.5.2-stable_win64.exe
+            sha512: b21115cf3620438e17959d13946bf9c7dceabb6ff71ed32a68996a21e08615edd2d1a3d25641bb3e260d084b31f500231aa59fcf026a5228bcc20ac4e8bade60
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25.0.2+10'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Download pinned Godot
+        shell: bash
+        run: |
+          mkdir -p tools
+          curl -fL --retry 3 "https://github.com/godotengine/godot-builds/releases/download/4.5.2-stable/Godot_v4.5.2-stable_${{ matrix.asset }}.zip" -o tools/godot.zip
+          python -c "import hashlib, pathlib; assert hashlib.sha512(pathlib.Path('tools/godot.zip').read_bytes()).hexdigest() == '${{ matrix.sha512 }}', 'Godot checksum mismatch'"
+          unzip -q tools/godot.zip -d tools
+          chmod +x "tools/${{ matrix.binary }}"
+      - name: Link runtimes and compile/run full gdcc project
+        run: python scripts/minimal-jre.py build --godot "tools/${{ matrix.binary }}"
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: minimal-jre-${{ matrix.platform }}
+          path: |
+            build/minimal-jre/${{ matrix.platform }}/*.log
+            build/minimal-jre/${{ matrix.platform }}/*.json
+            build/minimal-jre/${{ matrix.platform }}/*.tar.gz
+            hs_err_pid*.log
+          retention-days: 30
