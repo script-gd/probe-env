@@ -21,7 +21,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 INPUT = ROOT / "runtime-input"
-PROFILES = {"base": "java.base", "candidate": "java.base,java.xml,jdk.httpserver",
+PROFILES = {"base": "java.base", "cli": "java.base,java.desktop,java.logging",
             "full": "java.base,java.desktop,java.logging,jdk.httpserver"}
 FLAGS = ["--enable-native-access=ALL-UNNAMED", "--illegal-native-access=deny"]
 
@@ -71,7 +71,8 @@ def snapshot(gdcc):
         shutil.rmtree(app)
     (app / "lib").mkdir(parents=True)
     packed = app / "gdcc-0.0.2.jar"
-    run([Path(os.environ["JAVA_HOME"]) / "bin/jar", "--create", "--file", packed,
+    jar_tool = Path(os.environ["JAVA_HOME"]) / "bin" / ("jar.exe" if os.name == "nt" else "jar")
+    run([jar_tool, "--create", "--file", packed,
          "--date=2026-01-01T00:00:00Z", "--manifest", gdcc / "build/tmp/jar/MANIFEST.MF",
          "-C", classes, ".", "-C", resources, "."])
     for jar in sorted((gdcc / "build/libs/lib").glob("*.jar")):
@@ -83,7 +84,7 @@ def snapshot(gdcc):
     metadata = {"checkout_commit_at_snapshot": run(["git", "-C", gdcc, "rev-parse", "HEAD"]).stdout.strip(),
                 "packaged_from": ["build/classes/java/main", "build/resources/main", "build/tmp/jar/MANIFEST.MF"],
                 "jar_version_resource": version,
-                "files": {str(p.relative_to(INPUT)): digest(p) for p in sorted(INPUT.rglob("*"))
+                "files": {p.relative_to(INPUT).as_posix(): digest(p) for p in sorted(INPUT.rglob("*"))
                           if p.is_file() and p.name != "snapshot.json"}}
     (INPUT / "snapshot.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
@@ -226,15 +227,15 @@ def build(args):
             if len(libs) != 1:
                 raise RuntimeError(f"CLI did not produce exactly one native library: {libs}")
             godot_test(work, libs[0], args.godot, profile + "-cli", env)
-        elif profile == "full":
-            raise RuntimeError("Recommended full JRE failed real gdcc CLI compilation")
+        elif profile != "base":
+            raise RuntimeError("CLI-capable JRE failed real gdcc CLI compilation")
         elif "NoClassDefFoundError: java/util/logging/Logger" not in cli.stdout:
             raise RuntimeError("Control failed for an unexpected reason, not the omitted logging module")
         package = work / (image.name + ".tar.gz")
         archive(image, package)
         results["profiles"][profile] = {
             "root_modules": modules, "modules": sorted(actual_modules),
-            "scope": "gdcc-cli-and-rpc" if profile == "full" else "backend-only-control",
+            "scope": {"full": "gdcc-cli-and-rpc", "cli": "gdcc-cli", "base": "backend-only-control"}[profile],
             "image_bytes": sum(p.stat().st_size for p in image.rglob("*") if p.is_file()),
             "archive_bytes": package.stat().st_size, "archive_sha256": digest(package),
             "backend_and_godot": "pass", "cli_and_godot": "pass" if cli.returncode == 0 else "fail"}
@@ -276,7 +277,7 @@ def build(args):
     launch_args = [str(launcher), "--backend", "tcc", "-o", str(work / "relocated-cli/demo"),
                    str(ROOT / "fixture/source.gd")]
     if system == "Windows":
-        launch_args = ["cmd.exe", "/d", "/c", subprocess.list2cmdline(launch_args)]
+        launch_args = ["cmd.exe", "/d", "/c", "call", *launch_args]
     run(launch_args, log=work / "relocated-launcher.log", env=env)
     extension = ".dll" if system == "Windows" else ".dylib" if system == "Darwin" else ".so"
     relocated_libs = list((work / "relocated-cli/demo").glob("*" + extension))

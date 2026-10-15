@@ -1,0 +1,3 @@
+# Keep the hashed snapshot byte-identical on Windows checkouts.
+/runtime-input/** -text
+*.sh text eol=lf

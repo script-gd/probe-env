@@ -9,3 +9,4 @@ godot/bin/
 *.zip
 godot/*.uid
 runtime-input/app/lib/native/
+__pycache__/
