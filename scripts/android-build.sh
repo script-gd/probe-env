@@ -18,10 +18,12 @@ crt="$sysroot/usr/lib/$triple/$api"
 common=(--cpu="$cpu" --targetos=Android --config-backtrace=no --config-bcheck=no
     --sysroot="$sysroot/usr" --sysincludepaths="{B}/include:$sysroot/usr/include/$triple:$sysroot/usr/include"
     --libpaths="{B}:$crt:$sysroot/usr/lib/$triple" --crtprefix="$crt"
-    --tcc-switches= --disable-rpath)
+    --tcc-switches=-Wl,-section-alignment=0x4000)
 pushd "$out/host"
 "$root/vendor/tinycc/configure" "${common[@]}" --cc=cc --enable-static
 make -j2 tcc libtcc.a libtcc1.a
+mkdir -p "$out/host/include"
+cp -R "$root/vendor/tinycc/include/." "$out/host/include/"
 popd
 
 # Exercise the same libtcc API as gdcc, with an Android target fixed at build time.
