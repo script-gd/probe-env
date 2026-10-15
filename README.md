@@ -1,46 +1,52 @@
-# Native ARM64 TinyCC Probe
+# Android ARM64 TinyCC / gdcc Probe
 
-Standalone reproduction using gdcc's pinned TinyCC and a complete gdcc-generated
-C project. Native Linux ARM64 and macOS ARM64 runners compile the project via both
-the C API and Java 25 FFM, then load and execute it in Godot. The extended suite
-also exercises per-TU object caching, fresh-state relinking, and real cross-DSO
-HRX hot reload following Godot's lifecycle.
+Standalone investigation of compiling a complete gdcc-generated C project with
+gdcc's pinned TinyCC and running it in the official Godot Android editor.
 
-**Result:** both platforms pass with the experimental helper/build fixes described
-in [REPORT.md](REPORT.md). This is not yet ARM64 support in gdcc's production Java
-backend. Its object-cache/relink protocol is reproduced independently, rather
-than by running the full gdcc Java application.
+**Result:** Android ARM64 and x86_64 pass both desktop cross-compilation and
+in-app libtcc compilation, real editor-plugin assertions, coroutine TLS, and
+executable-thunk probes. ARM64 executes through Android's native bridge on an
+x86_64 emulator, not on physical ARM hardware. Actual 16 KB page devices and the
+production Java backend remain outside the verified scope.
 
-- [Validated native cache/reload run](https://github.com/script-gd/probe-env/actions/runs/38292874035)
-- [Report, fixes, evidence, and integration checklist](REPORT.md)
-- [Source provenance and pruning](vendor/README.md)
-- [Native runner workflow](.github/workflows/arm64.yml)
-- [Build and runtime probes](scripts/probe.sh)
-- [Object cache and cross-DSO reload suite](scripts/cache-reload.sh)
+- [Android Report (中文): results, required changes, pitfalls, and evidence](ANDROID_REPORT.md)
+- [Successful Android CI](https://github.com/script-gd/probe-env/actions/runs/38735984841)
+- [Android Workflow](.github/workflows/android.yml)
+- [Toolchain and Full-Project Build](scripts/android-build.sh)
+- [Official Android Editor Test](scripts/android-editor.sh)
+- [Source Provenance](vendor/README.md)
+
+The original pruned compiler, complete generated fixture, and Linux/macOS probes
+are retained. No full gdcc checkout or local Android SDK installation is required
+to run the workflow. The Android fixture itself is compiled by TinyCC, never by a
+silent Clang fallback. NDK Clang builds only the compiler and test harness.
 
 ## Reproduce
 
-Use the workflow above, or run from the repository root on a native ARM64 host
-with a C compiler, make, Java 25, and the appropriate Godot 4.5.2 executable:
+Run the Android workflow, or use an existing Linux x86_64 NDK installation and an
+adb-connected Android device. The script replaces `/sdcard/probe-env` and installs
+the official Godot editor APK; do not use that directory for real projects.
 
 ```bash
-GODOT_BIN=/absolute/path/to/Godot bash scripts/probe.sh
+ABI=arm64-v8a ANDROID_NDK_HOME=/absolute/path/to/android-ndk-r28b \
+  bash scripts/android-build.sh
+APK_ABI=arm64-v8a LIBPROBE_SO="$PWD/build/android/arm64-v8a/libprobe.so" \
+  bash scripts/android-editor.sh
+APK_ABI=arm64-v8a DEVICE_COMPILE=1 \
+  LIBPROBE_SO="$PWD/build/android/arm64-v8a/libprobe.so" \
+  bash scripts/android-editor.sh
 ```
 
-On macOS, install Xcode Command Line Tools / an accessible macOS SDK. The script
-intentionally runs failing TLS, flat-namespace, and cache-control negative tests;
-their nonzero exit statuses are expected. Final successful checks include
-`FFM_COMPILE_PASS`, `GDCC_PROJECT_PASS`, `COROUTINE_TLS_PASS`,
-`DLOPEN_ROUNDS_PASS::1100`, `OK thunkpage`, `CACHE_SUITE_PASS`,
-`CACHE_GODOT_PASS::<round>`, `RELOAD_PASS`, and `RELOAD_NEGATIVE_CONTROL_PASS`.
+See the report for the pinned API, bundle layout, emulator limitations, and the
+distinction between this native API experiment and gdcc's Java 25/FFM integration.
 
-After the main script has built libtcc and set up the Godot project, rerun just
-the new suite with the same `GODOT_BIN`:
+## Earlier Research
 
-```bash
-GODOT_BIN=/absolute/path/to/Godot bash scripts/cache-reload.sh
-```
+- [Linux/macOS ARM64 Report](REPORT.md)
+- [Native Workflow](.github/workflows/arm64.yml)
+- [Original Full Suite](scripts/probe.sh)
+- [Object Cache and Cross-DSO Reload Suite](scripts/cache-reload.sh)
 
-Its temporary fixture/cache stays under `build/cache-suite.*`; no checked-in
-generated source is mutated. On macOS it requires the two-level libtcc built by
-the main script, not the intentionally failing flat-namespace version.
+These earlier results are historical platform-specific evidence, not substitutes
+for the Android tests. On an appropriate native host they can still be run with
+`GODOT_BIN=/absolute/path/to/Godot bash scripts/probe.sh`.

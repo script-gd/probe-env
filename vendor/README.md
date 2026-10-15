@@ -5,6 +5,12 @@ TinyCC is exported from gdcc commit
 TinyCC upstream pin: `43c7708b85681a2fd4451c8a541af4494a8919b2`.
 The gdcc `u8` patch is preserved. Upstream licenses are preserved in the export.
 
+The Android branch reuses this export without compiler-source changes. Android
+NDK r28b headers, API-28 CRT/stubs, and target `libtcc1.a` are staged by
+`scripts/android-build.sh`; they are not vendored. See [ANDROID_REPORT.md](../ANDROID_REPORT.md)
+for the verified Android scope and the fixture's broader pthread-TLS fallback
+compared with current gdcc on x86_64. The ARM64 fallback has the same semantics.
+
 The complete generated C fixture comes from gdcc's
 `src/test/test_suite/unit_test/script/string_format/variant_operand.gd`.
 See [REPORT.md](../REPORT.md) for local experimental modifications and validation scope.
@@ -34,7 +40,10 @@ exercised.
 ## Godot / gdcc helpers
 
 The generated Godot C helpers (`fixture/include/gdcc`, `fixture/include/godot`)
-were freshly generated from a local gdcc jar rather than copied from the pinned
-gdcc commit, with one comment-only divergence in `gdcc_call.h` relative to the
-current gdcc source. The gdcc-specific patches to the vendored minicoro are
-kept inline in `fixture/include/gdcc/minicoro.h` (search for `gdcc patch`).
+were generated in the earlier investigation from a local gdcc jar rather than
+copied from the pinned gdcc commit. Compared with gdcc `3136c451`, `gdcc_call.h`
+and `gdcc_hrx.c` differ only in comments; `minicoro.h` also applies the pthread-key
+TLS fallback to all TinyCC POSIX targets, whereas current gdcc limits it to ARM64.
+The ARM64 behavior is equivalent. See the Android report for why the broader
+x86_64 fallback matters on Android. The gdcc-specific minicoro patches remain
+inline in `fixture/include/gdcc/minicoro.h`.
