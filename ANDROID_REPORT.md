@@ -15,7 +15,7 @@
 | 当前 gdcc Java TinyCC 后端是否已经支持 Android | **没有**。平台门禁、bundle、编译选项、宿主/目标选择和 Android 调用桥仍需接入 |
 | 是否已验证原生 ARM64 手机和 16 KB 页设备 | **没有**。ARM64 APK 在 x86_64 Android 模拟器的 ARM 转译层执行；实际页大小为 4096。16 KB 仅验证 ELF 对齐 |
 
-**最终通过的 CI：** [Android TinyCC / 38735984841](https://github.com/script-gd/probe-env/actions/runs/38735984841)，测试代码提交 `5c96b7810bf36f47263a40151ca9bb3edab47bf7`。`android (arm64-v8a)` 和 `android (x86_64)` 两个 job 均成功。
+**最终通过的完整 CI：** [Android TinyCC / 38761954842](https://github.com/script-gd/probe-env/actions/runs/38761954842)，提交 `e016755767bf443d76a1a5d2557a5ab88980c0e4`。`android (arm64-v8a)` 和 `android (x86_64)` 两个 job 均成功。Java 25 → D8 → ART → JNI → libtcc → GDExtension 热重载探针也在该 run 的 x86_64 job 通过，详见第 9 节。
 
 没有安装本地 Android SDK/NDK、模拟器或系统包；重工具链及运行测试全部在 GitHub Actions 的临时 runner 内完成。没有修改 `../gdcc`，没有复制整个 gdcc 项目，没有修改本轮的 `vendor/tinycc` 或 `fixture`。
 
@@ -378,7 +378,7 @@ bash scripts/java25-probe-build.sh
 javap -verbose build/java25/classes/gdcc/probe/Java25TccProbe.class
 ```
 
-Android 端脚本由 workflow 在构建 Android libtcc 和 JNI bridge、准备 API 35 模拟器后调用。CI 证据包含 `java25-logcat.txt`、`java25-cache.txt`、原始 major 69 classfile JAR 和 DEX JAR。该测试只在 x86_64 editor ABI 运行，不修改本机 SDK、NDK、Termux 或 Godot Editor APK。
+Android 端脚本由 workflow 在构建 Android libtcc 和 JNI bridge、准备 API 35 模拟器后调用。最新通过记录为 [Android TinyCC / 38761954842](https://github.com/script-gd/probe-env/actions/runs/38761954842)，代码提交 `e016755767bf443d76a1a5d2557a5ab88980c0e4`。x86_64 Editor log 中检查的成功标记包括 `JAVA25_ART_CLASS_INITIALIZED`、`JAVA25_JNI_TCC_RESULT::0`、`JAVA25_GDEXTENSION_RELOAD_STATUS::0`、`JAVA25_GDCC_CASE_PASS::java25=42`、`JAVA25_ART_RELOAD_PASS` 和 `ANDROID_EDITOR_RESULT::PASS`。CI artifact 另含 `java25-logcat.txt`、major 69 classfile JAR 和 DEX JAR；`java25-cache.txt` 只是 `run-as` 目录检查的输出，官方 Editor 包不可 debuggable，因此其中的 `package not debuggable` 诊断不用于证明或否定 app 私有缓存内容。该测试只在 x86_64 editor ABI 运行，不修改本机 SDK、NDK、Termux 或 Godot Editor APK。
 
 ## 10. 参考资料
 
