@@ -14,7 +14,7 @@ static void diagnostic(void *opaque, const char *message) {
 }
 
 int android_compile_project(int argc, char **argv) {
-    if (argc != 4) return 2;
+    if (argc != 4 && argc != 5) return 2;
     const char *units[] = {"entry.c", "include/godot/godot_binding.c",
         "include/gdcc/minicoro.c", "include/gdcc/gdcc_coroutine.c", "include/gdcc/gdcc_hrx.c"};
     TCCState *s = tcc_new();
@@ -30,7 +30,8 @@ int android_compile_project(int argc, char **argv) {
     if (!status) status = tcc_set_output_type(s, TCC_OUTPUT_DLL);
     for (unsigned i = 0; !status && i < sizeof(units) / sizeof(units[0]); i++) {
         char path[4096];
-        snprintf(path, sizeof(path), "%s/%s", argv[2], units[i]);
+        if (i == 0 && argc == 5) snprintf(path, sizeof(path), "%s", argv[4]);
+        else snprintf(path, sizeof(path), "%s/%s", argv[2], units[i]);
         fprintf(stderr, "TU %s\n", path);
         status = tcc_add_file(s, path);
     }

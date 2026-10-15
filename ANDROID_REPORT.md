@@ -263,10 +263,10 @@ org.godotengine.editor.v4/org.godotengine.editor.GodotEditor
 | `build-script/build-tinycc-*`、`gradle/tinycc.gradle.kts` | 增加 NDK 驱动、两步 bootstrap、API 固定、MANIFEST 与相对 sysroot 布局，CI 覆盖 Android |
 | `TinyCcCompiler.setupState():450-479` | 当前只有 `-std=c11`；加入 Android API 宏和 16 KB 链接配置，处理 libc/libm 等依赖 |
 | `TinyCcObjCache.java:63-89` | 已含 target、bundle VERSION 和 include hash；扩展 Android 配置时还需保证 NDK/API/选项变更确实使缓存失效，不能复用旧 glibc 或不同 API 的对象 |
-| Android 调用层 | 当前依赖 Java 25 和 `java.lang.foreign`；Godot Android app 的 ART 不是这套桌面 JDK FFM 环境，需要原生桥/JNI/GDExtension 集成或另行提供并验证 Java runtime |
+| Android 调用层 | 当前依赖 Java 25 和 `java.lang.foreign`；ART 没有公开的 Java 25 FFM API。新增的最小验证用 Android DEX + JNI 调用 libtcc，但还不是 gdcc 的生产 Java/JNI backend |
 | 协程与 HRX | 保留已存在的 ARM64 pthread TLS、ASM、icache 和 runtime page-size 路径；若接 Android x86_64，扩展 TLS 回退条件 |
 
-桌面方案可让现有 Java 前端继续生成 C，再加载 Linux-hosted / Android-target 的专用 libtcc。设备本地编译方案则优先把 libtcc 嵌入原生插件。本轮证明后者的 C 编译/加载能力，**没有证明整个 gdcc Java 应用已能在 Android 编辑器中运行**。
+桌面方案可让现有 Java 前端继续生成 C，再加载 Linux-hosted / Android-target 的专用 libtcc。设备本地编译方案则优先把 libtcc 嵌入原生插件。本轮 Java 25 探针进一步证明最小 Java 类可在 ART 中经 JNI 调用 libtcc；**没有证明整个 gdcc Java 应用、Java 25 HotSpot 或 FFM 已能在 Android 编辑器中运行**。
 
 ## 7. 失败实验与核验
 
@@ -321,13 +321,75 @@ build 脚本当前针对 Linux x86_64 工具链宿主，固定实验 API 为 28�
 
 最终 CI 的 artifact 为 `android-arm64-v8a` / `android-x86_64`，包含 `build.log`、`config.h`、ELF 清单、编译库、摘要、两轮 logcat、设备属性与 APK dumpsys。已下载到本机 `build/evidence-38735984841/`，该目录按惯例不纳入 Git。`bash -n`、`git diff --check` 与真实 CI 构建均通过；IntelliJ MCP build 接口返回 schema 错误，因此没有把它作为验证成功依据。
 
-剩余最重要的验证是：在原生 ARM64 手机上重复两轮 editor 测试，再在真正 16 KB 页的 ARM64 设备上重跑，并加入真实 Godot 跨 DSO hot reload / 缓存重链回归。除此之外，本轮已经建立了可复核的 Android 编译、链接、编辑器执行闭环，不再只是基于 Linux ARM64 的可行性推断。
+剩余最重要的验证是：在原生 ARM64 手机上重复测试，再在真正 16 KB 页设备上重跑；将当前单一类/单一字符串改动的重载探针扩展为 gdcc 实际生成的 HRX Callable、协程状态和 schema 变化热重载套件。除此之外，本轮已建立可复核的 Android 编译、链接、编辑器执行闭环，不再只是基于 Linux ARM64 的可行性推断。
 
-## 9. 参考资料
+## 9. Java 25 JAR、ART、JNI 与 Godot 热重载
+
+### 9.1 结论
+
+**最小端到端路径可行，但不是把 Termux 的 OpenJDK 25 直接嵌进 Godot。** Java 25 编译的测试 class/JAR（major version 69）经 D8 转成含 `classes.dex` 的 JAR 后，由 Godot Android Editor 进程内的 ART `DexClassLoader` 加载；Java 类通过 JNI 桥调用 Android-hosted libtcc，编译完整五 TU gdcc fixture 的第二个版本；Godot 插件随后执行真实 `GDExtensionManager.reload_extension()`，并观察到新实现返回 `java25=42`。
+
+运行时是 Android 自带 ART，不是 OpenJDK 25 HotSpot。DEX 不是 Java 25 classfile；D8 会将 classfile 改写为 ART 指令。因此这证明的是“Java 25 编译产物可经 D8 转换、在 ART 执行一段兼容 Android API 的 Java 逻辑”，不是 ART 支持直接运行 major 69 classfile、Java 25 新 API 或 `java.lang.foreign`。
+
+### 9.2 实验链路
+
+1. GitHub runner 使用 Temurin JDK 25 执行 `javac --release 25`，打包原始 classfile JAR，并用 `javap` 断言 `major version: 69`。
+2. 固定 R8/D8 `9.5.23`（SHA-256 固定在构建脚本），以 `--min-api 24` 将 classfile JAR 转为 DEX，再把 `classes.dex` 放入供 Android `DexClassLoader` 加载的 DEX JAR。
+3. NDK 构建 `libgdcc_java25_bridge.so`，它静态链接 Android-target `libtcc.a`，导出 Java native 方法并复用 `android_compile_project()`。原始生成的 `libprobe.so` 先由 Editor 加载，插件确认 `render(42) == "value=42"`。
+4. GDScript 把 DEX JAR 与 JNI `.so` 复制到 app 私有 `user://` 目录、设为只读，再创建 `DexClassLoader`。只读是 Android 14+ safer dynamic-code-loading 的要求；输出 DEX 优化目录仍可写。
+5. `Class.forName(..., true, loader)` 初始化 Java 测试类。它在后台线程把生成 C 的 `entry.c` 中一个字面量改为 `java25=%s`，并通过 JNI 将完整五个 TU 交给 libtcc 编译到 `libprobe-v2.so`。
+6. Editor 插件将 v2 放到原 GDExtension 源路径，调用 `GDExtensionManager.reload_extension("res://probe.gdextension")`，重新实例化同一 gdcc 生成类，并断言 `render(42) == "java25=42"`。
+
+这是实际 Godot Android Editor 的 unload/reopen/reinitialize，不只是 `dlopen()` 两个文件的宿主模拟。Godot 4.5.2 `platform/android/os_android.cpp` 的 `copy_dynamic_library()` 会在每次 Android 外部库加载时删除已有的 cache copy 并从项目路径重拷，因此本测试使用同一个源路径重载也会读到新文件。该结论针对本次锁定的 Godot 4.5.2 源码；若升级 Godot，应重新核对此行为。
+
+但热重载覆盖面仍很窄：替换的是 gdcc 已生成 C 项目的一个方法字面量，其余四个 TU 和 wrapper ABI 不变。没有在 Android 上遍历 gdcc 的跨代 HRX Callable 重绑定、协程迁移、schema 兼容/不兼容、活对象字段重建等完整回归；这些不能用本次 `reload_extension()` PASS 代替。
+
+### 9.3 为什么不直接装 Termux JDK
+
+Termux OpenJDK 25 是为 Termux 包前缀构建的，不是可搬进另一个 APK 的独立 runtime。当前包构建配置把 `$TERMUX_PREFIX` 写入 rpath/路径配置，并链接 Termux 提供的 `libandroid-shmem`、`libandroid-spawn` 等依赖；默认前缀在 Termux 私有目录。普通 Godot app 不能读取 `com.termux` 私有数据。直接复制 APK 或 JAR 不会解除前缀、依赖及 Android linker namespace 限制。
+
+即使另行构建可重定位的 OpenJDK 25，Godot Android Editor 自身是 ART app。不能再创建第二个 ART VM；`JNI_CreateJavaVM` 不是在现有 Android app 中启动另一个 ART 的支持接口。Pojav 类启动器通过预加载 Android HotSpot JRE 的库并调用 `JLI_Launch`，证明“另一个 HotSpot VM 共存”技术上可探索，但这不等于受支持的嵌入式 JVM：需要自构建/重定位整套 JRE 和依赖，并处理 linker namespace、JIT/W^X、信号链、16 KB 页及线程/崩溃隔离。本轮没有集成或验证该路线。
+
+Godot 4.5 Android Editor 文档说明不支持项目 Gradle build，也不支持把自定义 Android plugin/AAR 安装进现有 Editor APK。编辑器 APK 已提供 `JavaClassWrapper`；因此本探针没有重打包宿主，而是使用 Android 公共 `DexClassLoader` 在 app 私有目录加载转换后的 DEX。**原始 Java 25 classfile JAR 不能直接交给 ART；D8 是必需转换步骤。** gdcc 现有 FFM binding 不能原样运行在 ART 上，本探针以一小段 JNI wrapper 明确替代 FFM boundary。
+
+若产品必须执行 Java 25 HotSpot/FFM 代码，可选方案为：在用户已安装并授权的 Termux 中运行 Java 25 JAR，通过显式 IPC/共享文件把编译结果交给 Editor；或研究自包含、重定位的 HotSpot JRE 并接受第二 VM 的非官方支持成本。前者是跨 app 进程而非编辑器内调用，后者体积和运行时风险都显著高于本次 ART + JNI 路径。若只需 Java 逻辑，建议在 ART 上使用 Java/Kotlin 兼容 API，再通过稳定 JNI/GDExtension 边界访问 libtcc。
+
+### 9.4 复现与证据
+
+完整路径由 `.github/workflows/android.yml` 中 x86_64 ABI job 运行；Android 目标仍是 API 35 Google APIs x86_64 模拟器，Java classfile 由 JDK 25 构建，Editor 运行在其 app 进程内的 ART。新增入口：
+
+| 文件 | 作用 |
+| --- | --- |
+| `scripts/java25-probe-build.sh` | 编译 major 69 classfile JAR、验证哈希固定的 R8、生成 DEX JAR |
+| `scripts/java25/src/gdcc/probe/Java25TccProbe.java` | 最小 Java 编译器入口；生成不同内容的 fixture 并触发 JNI 编译 |
+| `probes/java25_jni_bridge.c` | Java native 方法到 libtcc C 驱动的 JNI 桥 |
+| `probes/android_compile.c` | 新增可替换第一个 TU 的参数形式；仍编译完整五 TU 项目 |
+| `scripts/android-java25-editor.sh` | 部署实验项目、启动官方 Editor、保存 logcat 并核验热重载标记 |
+| `android/project/addons/probe_runner/probe_runner.gd` | DEX classloader、JNI 结果轮询、真实 GDExtension reload 与 v2 行为断言 |
+
+可单独构建 Java/D8 输入：
+
+```bash
+bash scripts/java25-probe-build.sh
+javap -verbose build/java25/classes/gdcc/probe/Java25TccProbe.class
+```
+
+Android 端脚本由 workflow 在构建 Android libtcc 和 JNI bridge、准备 API 35 模拟器后调用。CI 证据包含 `java25-logcat.txt`、`java25-cache.txt`、原始 major 69 classfile JAR 和 DEX JAR。该测试只在 x86_64 editor ABI 运行，不修改本机 SDK、NDK、Termux 或 Godot Editor APK。
+
+## 10. 参考资料
 
 - [Godot 4.5.2 Android 动态库加载与 cache 复制源码](https://github.com/godotengine/godot/blob/4.5.2-stable/platform/android/os_android.cpp)
 - [GodotActivity 的 StringArray command-line extra](https://github.com/godotengine/godot/blob/4.5.2-stable/platform/android/java/lib/src/org/godotengine/godot/GodotActivity.kt)
 - [Godot Android editor 文档](https://docs.godotengine.org/en/stable/tutorials/editor/using_the_android_editor.html)
+- [Godot 4.5 JavaClassWrapper / AndroidRuntime 文档](https://docs.godotengine.org/en/4.5/tutorials/platform/android/javaclasswrapper_and_androidruntimeplugin.html)
+- [Godot 4.5.2 Android 外部动态库复制/重载实现](https://github.com/godotengine/godot/blob/4.5.2-stable/platform/android/os_android.cpp)
+- [Godot 4.5 GDExtensionManager.reload_extension](https://docs.godotengine.org/en/4.5/classes/class_gdextensionmanager.html)
+- [D8 官方文档：classfile 到 DEX](https://developer.android.com/tools/d8)
+- [Android 14 safer dynamic code loading](https://developer.android.com/about/versions/14/behavior-changes-14#safer-dynamic-code-loading)
+- [Termux OpenJDK 25 package build](https://github.com/termux/termux-packages/blob/master/packages/openjdk-25/build.sh)
+- [Termux binary non-portability policy](https://github.com/termux/termux-app/discussions/2459)
+- [Pojav JRE launcher: preload HotSpot and use JLI_Launch](https://github.com/PojavLauncherTeam/PojavLauncher/blob/v3_openjdk/app_pojavlauncher/src/main/java/net/kdt/pojavlaunch/utils/JREUtils.java)
+- [JEP 454: Java 22 finalized FFM API](https://openjdk.org/jeps/454)
 - [GDExtension 配置与 feature tags](https://docs.godotengine.org/en/4.5/tutorials/scripting/gdextension/gdextension_file.html)
 - [Bionic linker 变更：TEXTREL、SONAME、RUNPATH、W+X、ELF TLS](https://android.googlesource.com/platform/bionic/+/refs/heads/main/android-changes-for-ndk-developers.md)，本轮直接核对了其 [AOSP 镜像正文](https://github.com/aosp-mirror/platform_bionic/blob/master/android-changes-for-ndk-developers.md)
 - [Android 16 KB 页兼容指南](https://developer.android.com/guide/practices/page-sizes)

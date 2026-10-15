@@ -25,6 +25,14 @@ jobs:
         env:
           ABI: ${{ matrix.abi }}
         run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.1.13356709" bash scripts/android-build.sh
+      - uses: actions/setup-java@v4
+        if: matrix.abi == 'x86_64'
+        with:
+          distribution: temurin
+          java-version: '25'
+      - name: Build Java 25 classfile and ART DEX probe
+        if: matrix.abi == 'x86_64'
+        run: bash scripts/java25-probe-build.sh
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -45,6 +53,9 @@ jobs:
             APK_ABI=${{ matrix.abi }} DEVICE_COMPILE=1 LIBPROBE_SO=$PWD/build/android/${{ matrix.abi }}/libprobe.so bash scripts/android-editor.sh
             cp build/android/logcat.txt build/android/logcat-device.txt
             grep ANDROID_DEVICE_COMPILE_PASS build/android/logcat-device.txt
+            if [[ '${{ matrix.abi }}' == 'x86_64' ]]; then
+              bash scripts/android-java25-editor.sh
+            fi
       - uses: actions/upload-artifact@v6
         if: always()
         with:
@@ -55,3 +66,5 @@ jobs:
             build/android/**/*.so
             build/android/**/*.sha256
             build/android/**/config.h
+            build/android/**/java25-*.txt
+            build/java25/java25-probe-*.jar

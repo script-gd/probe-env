@@ -2,6 +2,7 @@
 
 entry_symbol = "gdextension_entry"
 compatibility_minimum = "4.5"
+reloadable = true
 
 [libraries]
 
