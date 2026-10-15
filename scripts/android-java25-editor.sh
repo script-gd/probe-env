@@ -20,7 +20,10 @@ cp "$out/libprobe.so" "$stage/bin/libprobe.so"
 cp "$out/libgdcc_java25_bridge.so" "$stage/java25/"
 cp "$jar" "$stage/java25/java25-probe-dex.jar"
 cp -R "$out/bundle" "$stage/bundle"
-cp -R "$root/fixture" "$stage/fixture"
+mkdir -p "$stage/fixture/include"
+cp "$root/fixture/entry.c" "$root/fixture/entry.h" "$root/fixture/object_fat_ptr_types.h" \
+    "$stage/fixture/"
+cp -R "$root/fixture/include/gdcc" "$root/fixture/include/godot" "$stage/fixture/include/"
 adb shell appops set --uid "$pkg" MANAGE_EXTERNAL_STORAGE allow
 adb shell rm -rf "$project"
 adb push "$stage" "$project"
