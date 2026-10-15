@@ -287,6 +287,7 @@ org.godotengine.editor.v4/org.godotengine.editor.GodotEditor
 | Java 25 首次 Android Editor 集成 | Godot 4.5 的 `FileAccess` 没有静态 `copy()`；插件脚本解析失败，之前的通用 editor smoke 因只等 PASS/崩溃标记而等满超时。改用 `FileAccess` 实例流，并让脚本在 parse/load 错误时立即失败 |
 | emulator-runner 内联条件 | runner 将 workflow `script` 的每行作为独立 shell 命令执行；多行 `if/fi` 即使改成 POSIX `[ ... ]` 仍会提前退出。把条件和调用合并为单行 |
 | Editor reload 后重扫 fixture 脚本 | 前一轮通用设备编译把完整 `fixture/` 留在被忽略的 `android/project/fixture`，Java25 staging 先复制整个项目后只覆盖 C 文件，仍残留 `source.gd`；其 `class_name StringFormatVariantOperand` 与重载后的 native class 冲突。现在先清除 staging 的 bin/bundle/fixture，再仅复制五个 C TU 所需的 C 文件和头文件 |
+| Java25 最小 fixture 裁剪 | JNI 已在 ART 成功加载，但首轮裁剪漏了根目录生成头 `engine_method_binds.h`，TinyCC 报 `entry.h:70: error: include file ... not found`。将其与 `entry.h`、`object_fat_ptr_types.h` 一并复制 |
 | API 30 ARM 转译 GUI | 库已经加载，后续 `ndk_translation 0.2.2` 报 `Undefined instruction 0x5ea1b842` / SIGILL，未到插件 PASS，见 [38734181068](https://github.com/script-gd/probe-env/actions/runs/38734181068) |
 | API 35 + `--headless` Android editor Activity | x86_64 发生 SIGSEGV，ARM 测试中断，见 [38735067902](https://github.com/script-gd/probe-env/actions/runs/38735067902)；没有把桌面 headless 使用习惯当成 Android app 保证 |
 | 最终 API 35 + GUI + 4 GB RAM | 两种 ABI 全通过。镜像、内存、headless 多个因素先后变更，不能声称已单独定位此前崩溃的全部根因 |

@@ -23,7 +23,7 @@ cp "$jar" "$stage/java25/java25-probe-dex.jar"
 cp -R "$out/bundle" "$stage/bundle"
 mkdir -p "$stage/fixture/include"
 cp "$root/fixture/entry.c" "$root/fixture/entry.h" "$root/fixture/object_fat_ptr_types.h" \
-    "$stage/fixture/"
+    "$root/fixture/engine_method_binds.h" "$stage/fixture/"
 cp -R "$root/fixture/include/gdcc" "$root/fixture/include/godot" "$stage/fixture/include/"
 adb shell appops set --uid "$pkg" MANAGE_EXTERNAL_STORAGE allow
 adb shell rm -rf "$project"
