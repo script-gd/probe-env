@@ -31,7 +31,7 @@ adb shell rm -rf "$project"
 adb push "$root/android/project" /sdcard/probe-env
 adb logcat -c
 adb shell am start -S -n "$pkg/org.godotengine.editor.GodotEditor" \
-    --esa command_line_params "--editor,--path,$project,--rendering-method,gl_compatibility,--verbose" \
+    --esa command_line_params "--headless,--editor,--path,$project,--rendering-method,gl_compatibility,--verbose" \
     | tee "$out/am-start.txt"
 result=1
 for ((i=0; i<120; i++)); do
