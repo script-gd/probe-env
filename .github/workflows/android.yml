@@ -53,7 +53,7 @@ jobs:
             APK_ABI=${{ matrix.abi }} DEVICE_COMPILE=1 LIBPROBE_SO=$PWD/build/android/${{ matrix.abi }}/libprobe.so bash scripts/android-editor.sh
             cp build/android/logcat.txt build/android/logcat-device.txt
             grep ANDROID_DEVICE_COMPILE_PASS build/android/logcat-device.txt
-            if [[ '${{ matrix.abi }}' == 'x86_64' ]]; then
+            if [ '${{ matrix.abi }}' = 'x86_64' ]; then
               bash scripts/android-java25-editor.sh
             fi
       - uses: actions/upload-artifact@v6
