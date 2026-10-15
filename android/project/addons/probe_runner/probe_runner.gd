@@ -101,7 +101,20 @@ func _run_java25_reload() -> void:
 	_finish(ok)
 
 func _copy_to_user(source: String, target: String) -> bool:
-	return FileAccess.copy(source, target) == OK
+	var input = FileAccess.open(source, FileAccess.READ)
+	if input == null:
+		return false
+	var data := input.get_buffer(input.get_length())
+	input.close()
+	if data.is_empty():
+		return false
+	var output = FileAccess.open(target, FileAccess.WRITE)
+	if output == null:
+		return false
+	output.store_buffer(data)
+	var ok := output.get_error() == OK
+	output.close()
+	return ok
 
 func _finish(ok: bool) -> void:
 	if ok:

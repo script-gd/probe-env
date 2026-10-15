@@ -284,6 +284,7 @@ org.godotengine.editor.v4/org.godotengine.editor.GodotEditor
 | --- | --- |
 | SDK setup 默认安装 `tools` | 该过时 package 已不在仓库，CI 在编译前失败；改为仅安装 platform-tools 和固定 NDK |
 | 未复制 TinyCC 自带 headers | 完整项目报 `stddef.h not found`；补齐 `{B}/include`，不是改生成的 C |
+| Java 25 首次 Android Editor 集成 | Godot 4.5 的 `FileAccess` 没有静态 `copy()`；插件脚本解析失败，之前的通用 editor smoke 因只等 PASS/崩溃标记而等满超时。改用 `FileAccess` 实例流，并让脚本在 parse/load 错误时立即失败 |
 | API 30 ARM 转译 GUI | 库已经加载，后续 `ndk_translation 0.2.2` 报 `Undefined instruction 0x5ea1b842` / SIGILL，未到插件 PASS，见 [38734181068](https://github.com/script-gd/probe-env/actions/runs/38734181068) |
 | API 35 + `--headless` Android editor Activity | x86_64 发生 SIGSEGV，ARM 测试中断，见 [38735067902](https://github.com/script-gd/probe-env/actions/runs/38735067902)；没有把桌面 headless 使用习惯当成 Android app 保证 |
 | 最终 API 35 + GUI + 4 GB RAM | 两种 ABI 全通过。镜像、内存、headless 多个因素先后变更，不能声称已单独定位此前崩溃的全部根因 |

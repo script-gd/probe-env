@@ -31,7 +31,7 @@ result=1
 for ((i=0; i<180; i++)); do
     adb logcat -d > "$out/java25-logcat.txt"
     if grep -q 'JAVA25_ART_RELOAD_PASS' "$out/java25-logcat.txt"; then result=0; break; fi
-    if grep -Eq 'ANDROID_EDITOR_RESULT::FAIL|JAVA25_GDEXTENSION_RELOAD_STATUS::[1-9]|Fatal signal|FATAL EXCEPTION' \
+    if grep -Eq 'ANDROID_EDITOR_RESULT::FAIL|JAVA25_GDEXTENSION_RELOAD_STATUS::[1-9]|Fatal signal|FATAL EXCEPTION|SCRIPT ERROR|Failed to load script' \
             "$out/java25-logcat.txt"; then break; fi
     sleep 2
 done

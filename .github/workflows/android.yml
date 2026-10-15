@@ -25,7 +25,7 @@ jobs:
         env:
           ABI: ${{ matrix.abi }}
         run: ANDROID_NDK_HOME="$ANDROID_HOME/ndk/28.1.13356709" bash scripts/android-build.sh
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         if: matrix.abi == 'x86_64'
         with:
           distribution: temurin

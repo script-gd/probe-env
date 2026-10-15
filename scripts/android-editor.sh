@@ -41,7 +41,8 @@ for ((i=0; i<120; i++)); do
         break
     fi
     if grep -q 'ANDROID_EDITOR_RESULT::PASS' "$out/logcat.txt"; then result=0; break; fi
-    if grep -Eq 'ANDROID_EDITOR_RESULT::FAIL|Fatal signal|FATAL EXCEPTION' "$out/logcat.txt"; then break; fi
+    if grep -Eq 'ANDROID_EDITOR_RESULT::FAIL|Fatal signal|FATAL EXCEPTION|SCRIPT ERROR: Parse Error|Failed to load script' \
+            "$out/logcat.txt"; then break; fi
     sleep 3
 done
 adb shell dumpsys activity activities > "$out/dumpsys-activity.txt"
