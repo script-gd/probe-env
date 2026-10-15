@@ -22,6 +22,7 @@ adb shell dumpsys package "$pkg" > "$out/dumpsys-package.txt"
 cp "$lib" "$root/android/project/bin/libprobe.so"
 if [[ "${DEVICE_COMPILE:-0}" = 1 ]]; then
     cp "$(dirname "$lib")/libbootstrap.so" "$root/android/project/bin/libprobe.so"
+    cp "$(dirname "$lib")/libcoroutine.so" "$(dirname "$lib")/libhrx.so" "$root/android/project/bin/"
     cp -R "$(dirname "$lib")/bundle" "$root/android/project/"
     cp -R "$root/fixture" "$root/android/project/"
 fi
@@ -44,4 +45,9 @@ adb shell run-as "$pkg" ls -laR cache > "$out/cache-paths.txt" 2>&1 || true
 grep -E 'GDCC_|ANDROID_EDITOR_|Copying library|Opening library|dlopen|Fatal signal|ERROR:' "$out/logcat.txt" || true
 adb shell am force-stop "$pkg"
 test "$result" = 0
+if [[ "${DEVICE_COMPILE:-0}" = 1 ]]; then
+    grep 'ANDROID_DEVICE_COMPILE_PASS' "$out/logcat.txt"
+    grep 'ANDROID_HELPER_PASS::coroutine::32' "$out/logcat.txt"
+    grep 'ANDROID_HELPER_PASS::hrx::1' "$out/logcat.txt"
+fi
 printf 'ANDROID_EDITOR_PASS::%s\n' "$abi"

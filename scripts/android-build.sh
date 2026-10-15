@@ -65,6 +65,12 @@ tcc=("$out/host/tcc" -B"$out/host" -std=c11 -D__ANDROID_API__="$api" -Wl,-sectio
 if grep -Eq 'TEXTREL|NEEDED.*(libc\.so\.6|libpthread|ld-linux)' "$out/elf.txt"; then exit 1; fi
 if grep -q ' TLS ' "$out/coroutine-segments.txt"; then exit 1; fi
 "$toolchain/bin/llvm-readelf" -l "$out/libprobe.so" | grep LOAD
+while IFS= read -r line; do
+    if [[ "$line" == *LOAD* ]]; then
+        align="${line##* }"
+        test "$((align))" -ge 16384
+    fi
+done < <("$toolchain/bin/llvm-readelf" -l "$out/libprobe.so")
 grep 'gdextension_entry' "$out/elf.txt"
 sha256sum "$out/libprobe.so" > "$out/libprobe.sha256"
 printf 'ANDROID_TCC_BUILD_PASS::%s\n' "$abi"
