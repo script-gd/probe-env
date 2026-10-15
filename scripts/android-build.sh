@@ -35,11 +35,15 @@ pushd "$out/device"
     --libpaths='{B}/lib:{B}' --crtprefix='{B}/lib' \
     --disable-static --extra-ldflags=-Wl,-z,max-page-size=16384
 cc -DC2STR "$root/vendor/tinycc/conftest.c" -o c2str.exe
-make -j2 tcc libtcc.so LIBS='-lm -ldl'
+make -j2 tcc libtcc.so libtcc.a LIBS='-lm -ldl'
 popd
 "$toolchain/bin/${triple}${api}-clang" -I"$root/vendor/tinycc" \
-    "$root/probes/android_compile.c" -L"$out/device" -ltcc -Wl,-rpath,'$ORIGIN' \
+    "$root/probes/android_compile.c" -L"$out/device" -ltcc -llog -Wl,-rpath,'$ORIGIN' \
     -Wl,-z,max-page-size=16384 -o "$out/device/compile"
+"$toolchain/bin/${triple}${api}-clang" -shared -fPIC -DANDROID_BOOTSTRAP \
+    -I"$root/vendor/tinycc" -I"$root/fixture/include/godot" \
+    "$root/probes/android_bootstrap.c" "$root/probes/android_compile.c" "$out/device/libtcc.a" \
+    -lm -ldl -llog -Wl,-z,max-page-size=16384 -o "$out/libbootstrap.so"
 cp "$out/host/libtcc1.a" "$out/bundle/"
 cp -R "$sysroot/usr/include/." "$out/bundle/include/"
 cp -R "$root/vendor/tinycc/include/." "$out/bundle/include/"

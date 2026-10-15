@@ -35,7 +35,12 @@ jobs:
           profile: pixel_2
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: APK_ABI=${{ matrix.abi }} LIBPROBE_SO=$PWD/build/android/${{ matrix.abi }}/libprobe.so bash scripts/android-editor.sh
+          script: |
+            APK_ABI=${{ matrix.abi }} LIBPROBE_SO=$PWD/build/android/${{ matrix.abi }}/libprobe.so bash scripts/android-editor.sh
+            cp build/android/logcat.txt build/android/logcat-cross.txt
+            APK_ABI=${{ matrix.abi }} DEVICE_COMPILE=1 LIBPROBE_SO=$PWD/build/android/${{ matrix.abi }}/libprobe.so bash scripts/android-editor.sh
+            cp build/android/logcat.txt build/android/logcat-device.txt
+            grep ANDROID_DEVICE_COMPILE_PASS build/android/logcat-device.txt
       - uses: actions/upload-artifact@v6
         if: always()
         with:

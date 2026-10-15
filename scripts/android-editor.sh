@@ -20,6 +20,11 @@ adb install -r -g --abi "$abi" "$apk"
 adb shell appops set --uid "$pkg" MANAGE_EXTERNAL_STORAGE allow
 adb shell dumpsys package "$pkg" > "$out/dumpsys-package.txt"
 cp "$lib" "$root/android/project/bin/libprobe.so"
+if [[ "${DEVICE_COMPILE:-0}" = 1 ]]; then
+    cp "$(dirname "$lib")/libbootstrap.so" "$root/android/project/bin/libprobe.so"
+    cp -R "$(dirname "$lib")/bundle" "$root/android/project/"
+    cp -R "$root/fixture" "$root/android/project/"
+fi
 cp "$root/android/project/extension_list.cfg" "$root/android/project/.godot/extension_list.cfg"
 adb shell rm -rf "$project"
 adb push "$root/android/project" /sdcard/probe-env

@@ -1,13 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "libtcc.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 
 static void diagnostic(void *opaque, const char *message) {
     (void)opaque;
     fprintf(stderr, "libtcc: %s\n", message);
+#ifdef __ANDROID__
+    __android_log_print(ANDROID_LOG_INFO, "godot", "libtcc: %s", message);
+#endif
 }
 
-int main(int argc, char **argv) {
+int android_compile_project(int argc, char **argv) {
     if (argc != 4) return 2;
     const char *units[] = {"entry.c", "include/godot/godot_binding.c",
         "include/gdcc/minicoro.c", "include/gdcc/gdcc_coroutine.c", "include/gdcc/gdcc_hrx.c"};
@@ -34,3 +40,9 @@ int main(int argc, char **argv) {
     if (!status) puts("ANDROID_LIBTCC_PROJECT_PASS");
     return status ? 1 : 0;
 }
+
+#ifndef ANDROID_BOOTSTRAP
+int main(int argc, char **argv) {
+    return android_compile_project(argc, argv);
+}
+#endif

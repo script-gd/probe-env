@@ -1,3 +1,5 @@
 .godot/
 bin/*.so
+bundle/
+fixture/
 *.uid
