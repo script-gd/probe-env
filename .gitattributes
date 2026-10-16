@@ -1,3 +1,4 @@
 # Keep the hashed snapshot byte-identical on Windows checkouts.
 /runtime-input/** -text
 *.sh text eol=lf
+/patches/freemarker-no-desktop.patch text eol=lf whitespace=-blank-at-eol

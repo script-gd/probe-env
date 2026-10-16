@@ -108,13 +108,13 @@ def godot_test(work, library, godot, label, env):
         raise RuntimeError("Godot did not execute the generated extension")
 
 
-def rpc_test(java, jar, work, env):
+def rpc_test(java, jar, work, env, *, extra_flags=()):
     # Bind only loopback. The temporary-port race is bounded by startup timeout and fails closed.
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     with (work / "rpc.log").open("w", encoding="utf-8") as output:
-        proc = subprocess.Popen([str(java), *FLAGS, "-jar", str(jar), "serve", "--port", str(port)],
+        proc = subprocess.Popen([str(java), *extra_flags, *FLAGS, "-jar", str(jar), "serve", "--port", str(port)],
                                 cwd=work, env=env, stdout=output, stderr=subprocess.STDOUT)
         try:
             for attempt in range(60):
