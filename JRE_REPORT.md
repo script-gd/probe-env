@@ -1,5 +1,7 @@
 # gdcc 最小 JRE 调研
 
+后续关于精简 JavaBeans 模块、`java.base` patch 和 FreeMarker 去依赖的实测研究见 [DESKTOP_FREE_REPORT.md](DESKTOP_FREE_REPORT.md)。本报告保留原版依赖、标准模块级裁剪的基线结果。
+
 ## 1. 目标与结论边界
 
 目标是在 **不使用 native-image、不复制整个 gdcc 工程、不要求用户安装完整 JDK** 的条件下，运行 gdcc 的 TinyCC 后端，并将完整的 gdcc C 工程编译成动态库，交给真实 Godot 执行。
