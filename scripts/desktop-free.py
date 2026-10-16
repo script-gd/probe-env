@@ -58,6 +58,8 @@ def build(args):
               "--out", work / "beans", "--negative-test"], log=work / "beans-build.log", env=env)
     base.run([sys.executable, ROOT / "scripts/freemarker-no-desktop.py", "--jdk", jdk,
               "--out", work / "freemarker"], log=work / "freemarker-build.log", env=env)
+    base.run([sys.executable, ROOT / "scripts/freemarker-openbeans.py", "--jdk", jdk,
+              "--out", work / "openbeans"], log=work / "openbeans-build.log", env=env)
 
     baseline = work / "baseline-jre"
     base.run([tool("jlink"), "--add-modules", base.PROFILES["full"], "--strip-debug",
@@ -99,7 +101,8 @@ def build(args):
     if unmodified_gae.returncode != 2 or "java/beans/IntrospectionException" not in unmodified_gae.stdout:
         raise RuntimeError("Expected unmodified GAE to retain its JavaBeans dependency")
     variants = [("baseline", baseline), ("beans-module", work / "beans/jre"),
-                ("beans-patch", patched_image), ("freemarker-fork", fork_image)]
+                ("beans-patch", patched_image), ("freemarker-fork", fork_image),
+                ("freemarker-openbeans", fork_image)]
     for name, image in variants:
         env["GDCC_TINYCC_HOME"] = str(native)
         app = work / (name + "-app")
@@ -107,6 +110,10 @@ def build(args):
         if name == "freemarker-fork":
             shutil.copy2(work / "freemarker/freemarker-gae-2.3.34-no-desktop.jar",
                          app / "lib/freemarker-2.3.34.jar")
+        elif name == "freemarker-openbeans":
+            shutil.copy2(work / "openbeans/freemarker-gae-2.3.34-openbeans.jar",
+                         app / "lib/freemarker-2.3.34.jar")
+            shutil.copy2(work / "openbeans/openbeans-1.0.2.jar", app / "lib")
         jar = app / original_jar.name
         java = beans.tool(image, "java")
         extra = patch_flags(image) if name == "beans-patch" else []
@@ -129,6 +136,9 @@ def build(args):
             reference_semantics = semantic_lines
         elif semantic_lines != reference_semantics:
             raise RuntimeError("FreeMarker core semantics differ: " + name)
+        if name == "freemarker-openbeans":
+            base.run([java, "-cp", os.pathsep.join([str(classes), str(app / "lib/freemarker-2.3.34.jar")]),
+                      "FreeMarkerSemanticsProbe", "--mode=setting"], log=work / "openbeans-setting.log", env=env)
         env["GDCC_SHARED_C_COMPILER_CACHE"] = str(work / (name + "-backend-cache"))
         fixture = work / (name + "-fixture")
         shutil.copytree(ROOT / "fixture", fixture,
@@ -167,6 +177,9 @@ def build(args):
             for directory in ("patched-src", "patch", "license"):
                 shutil.copytree(work / "freemarker" / directory, dist / "freemarker-audit" / directory)
             shutil.copy2(work / "freemarker/provenance.json", dist / "freemarker-audit/provenance.json")
+        elif name == "freemarker-openbeans":
+            shutil.copytree(work / "openbeans/audit", dist / "freemarker-openbeans-audit")
+            shutil.copy2(work / "openbeans/provenance.json", dist / "freemarker-openbeans-audit/provenance.json")
         else:
             shutil.copy2(work / "beans/provenance.json", dist / "beans-provenance.json")
         sh_extra = (' --patch-module "java.base=$HERE/jre/beans-patch.jar"'
@@ -238,6 +251,7 @@ def build(args):
         if name == "fork" and (setting.returncode != 2 or "java/beans/" not in setting.stdout):
             raise RuntimeError("Expected unsupported named-setting desktop dependency")
     result["fork_named_object_builder_settings"] = "unsupported without desktop; demonstrated"
+    result["openbeans_named_object_builder_settings"] = "pass without desktop"
     (work / "results.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print("DESKTOP_FREE_SUITE_PASS::" + key, flush=True)
 

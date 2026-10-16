@@ -7,6 +7,7 @@ on:
       - 'scripts/desktop-free.py'
       - 'scripts/beans-runtime.py'
       - 'scripts/freemarker-no-desktop.py'
+      - 'scripts/freemarker-openbeans.py'
       - 'scripts/minimal-jre.py'
       - 'patches/freemarker-no-desktop.patch'
       - 'probes/FreeMarkerSemanticsProbe.java'
@@ -69,4 +70,5 @@ jobs:
             build/desktop-free/${{ matrix.platform }}/beans/provenance.json
             build/desktop-free/${{ matrix.platform }}/beans/audit/*.txt
             build/desktop-free/${{ matrix.platform }}/freemarker/provenance.json
+            build/desktop-free/${{ matrix.platform }}/openbeans/provenance.json
           retention-days: 30
