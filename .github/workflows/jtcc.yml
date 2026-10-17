@@ -25,6 +25,30 @@ jobs:
       - name: Smoke-test the produced shared library
         run: python3 -c "import ctypes; ctypes.CDLL('tmp/tcc-ref/libprobe.so'); print('dlopen OK')"
 
+  pe-dll-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cross-build reference PE tcc from keep-set and compile fixture to probe.dll
+        run: ./scripts/build-tcc-ref-pe.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-dll
+          path: tmp/tcc-ref-pe/probe.dll
+
+  pe-dll-load:
+    runs-on: windows-latest
+    needs: pe-dll-build
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: probe-dll
+
+      - name: Load probe.dll on Windows
+        run: python -c "import ctypes; ctypes.CDLL('probe.dll'); print('LoadLibrary OK')"
+
   macho-dylib:
     runs-on: macos-14
     steps:
