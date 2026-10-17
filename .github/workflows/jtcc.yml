@@ -47,7 +47,7 @@ jobs:
           name: probe-dll
 
       - name: Load probe.dll on Windows
-        run: python -c "import ctypes; ctypes.CDLL('probe.dll'); print('LoadLibrary OK')"
+        run: python -c "import ctypes, os; ctypes.CDLL(os.path.abspath('probe.dll')); print('LoadLibrary OK')"
 
   macho-dylib:
     runs-on: macos-14
