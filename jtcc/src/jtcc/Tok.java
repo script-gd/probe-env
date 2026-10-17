@@ -14,6 +14,9 @@ public final class Tok {
     public final boolean bol;   // first token on a logical line
     /** Hideset: macro names that must not be re-expanded at this token. */
     Set<String> hs;
+    /** True for `##` tokens originating from a macro DEFINITION body (paste operator);
+     *  `##` coming from macro arguments is literal text (tcc rule, pp/17). */
+    boolean pasteOp;
 
     public Tok(Kind kind, String text, int line, String file, boolean ws, boolean bol) {
         this.kind = kind;

@@ -22,6 +22,15 @@ jobs:
       - name: Compile fixture to .so and check jtcc/tcc -E token parity
         run: ./scripts/check-all.sh
 
+      - name: tinycc tests2 baseline (reference tcc, NORUN mode)
+        run: ./scripts/run-tests2.sh tmp/tcc-ref/tcc tmp/tcc-ref tmp/tests2-out
+
+      - name: tinycc pp tests (reference tcc)
+        run: ./scripts/run-pp-tests.sh tcc tmp/tcc-ref/tcc tmp/tcc-ref tmp/pp-tcc-out
+
+      - name: tinycc pp tests (jtcc Java preprocessor)
+        run: ./scripts/run-pp-tests.sh jtcc tmp/classes tmp/tcc-ref tmp/pp-jtcc-out
+
       - name: Smoke-test the produced shared library
         run: python3 -c "import ctypes; ctypes.CDLL('tmp/tcc-ref/libprobe.so'); print('dlopen OK')"
 

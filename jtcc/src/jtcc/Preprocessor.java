@@ -70,15 +70,13 @@ public final class Preprocessor {
     public String outputText() {
         StringBuilder sb = new StringBuilder();
         Tok prev = null;
-        int prevLine = -1;
-        for (Tok t : out) {
-            if (prev != null) {
-                if (t.line != prevLine) { sb.append('\n'); prev = null; }
-            }
-            if (prev != null && (t.ws || needSpace(prev, t))) sb.append(' ');
+        for (int idx = 0; idx < out.size(); idx++) {
+            Tok t = out.get(idx);
+            if (breaks.contains(idx)) { sb.append('\n'); prev = null; }
+            if (prev == null) { if (t.ws && sb.length() > 0) sb.append(' '); }
+            else if (t.ws || needSpace(prev, t)) sb.append(' ');
             sb.append(t.text);
             prev = t;
-            prevLine = t.line;
         }
         if (prev != null) sb.append('\n');
         return sb.toString();
@@ -159,11 +157,18 @@ public final class Preprocessor {
                     if (t == null) break;
                     fromStream = true;
                 }
-                if (fromStream) {
-                    if (t.kind == Tok.Kind.NL) continue;
-                    if (t.bol && t.isPunct("#")) { directive(t); continue; }
-                    if (!active()) { skipToNextDirective(t); continue; }
+                if (t.kind == Tok.Kind.NL) {
+                    if (!out.isEmpty()) breaks.add(out.size());
+                    continue;
                 }
+                // directive check applies to both origins: pending holds directive tokens
+                // only at expansion/lookahead boundaries pushed back by expandMacroTok
+                if (t.bol && t.isPunct("#")) {
+                    directive(t);
+                    if (!out.isEmpty()) breaks.add(out.size());
+                    continue;
+                }
+                if (fromStream && !active()) { skipToNextDirective(t); continue; }
                 expandTok(t);
             }
         } catch (PpError e) {
@@ -173,6 +178,10 @@ public final class Preprocessor {
 
     /** Expansion-produced tokens awaiting rescanning (the unified tcc-style token stream). */
     private final ArrayDeque<Tok> pending = new ArrayDeque<>();
+
+    /** Indices in `out` where a raw-stream line break occurred (tcc -E newline model:
+     *  newlines come only from LINEFEED tokens not swallowed by macro arg collection). */
+    private final java.util.Set<Integer> breaks = new java.util.HashSet<>();
 
     private Tok pull() {
         Tok t = pending.poll();
@@ -184,6 +193,18 @@ public final class Preprocessor {
 
     private void pushBack(List<Tok> toks) {
         for (int k = toks.size() - 1; k >= 0; k--) pending.addFirst(toks.get(k));
+    }
+
+    /** The first token of a macro expansion adopts the invocation site's leading-ws flag
+     *  (tcc -E prints source whitespace ahead of the replayed token stream). */
+    private static List<Tok> adoptInvokeWs(List<Tok> toks, Tok callSite) {
+        if (!toks.isEmpty() && toks.get(0).ws != callSite.ws) {
+            Tok f = toks.get(0);
+            Tok nf = new Tok(f.kind, f.text, f.line, f.file, callSite.ws, f.bol);
+            nf.hs = f.hs; nf.pasteOp = f.pasteOp;
+            toks.set(0, nf);
+        }
+        return toks;
     }
 
     /** Expand one token of the main stream; macro substitution results are rescanned via pending. */
@@ -218,38 +239,34 @@ public final class Preprocessor {
     private void expandMacroTok(Tok t, Macro m) {
         if (hidden(t, t.text)) { out.add(t); return; }
         if (!m.functionLike) {
-            pushBack(pasteTokens(applyHideset(m.body, t.text, t, null), null, false));
+            pushBack(adoptInvokeWs(pasteTokens(applyHideset(m.body, t.text, t, null), null, false), t));
             return;
         }
         // function-like: pull next token (skipping NLs) from pending or stream
         Tok open = pull();
-        while (open != null && open.kind == Tok.Kind.NL) open = pull();
+        List<Tok> skippedNls = new ArrayList<>();
+        while (open != null && open.kind == Tok.Kind.NL) { skippedNls.add(open); open = pull(); }
         if (open == null || !open.isPunct("(") || hidden(open, t.text)) {
             out.add(t);
             if (open != null) {
-                if (open.bol && open.isPunct("#")) {
-                    // a directive line follows the uninvoked macro name: handle it now
-                    // (only reachable when open came from the raw stream; pending never
-                    // holds directive tokens)
-                    if (open.kind == Tok.Kind.PUNCT) { directive(open); return; }
-                }
                 pending.addFirst(open);
+                // preserve skipped line breaks as markers (a directive token here is
+                // handled by the uniform directive check in run())
+                for (int k = skippedNls.size() - 1; k >= 0; k--) pending.addFirst(skippedNls.get(k));
             }
             return;
         }
         List<List<Tok>> args = collectArgsStream();
         // Prosser: substitution hideset = intersect(hs(name), hs(token after invocation)) ∪ {name}
         Tok after = pull();
-        while (after != null && after.kind == Tok.Kind.NL) after = pull();
+        int afterNls = 0;
+        while (after != null && after.kind == Tok.Kind.NL) { afterNls++; after = pull(); }
         Set<String> afterHs = after == null || after.hs == null ? Set.of() : after.hs;
         if (after != null) {
-            if (after.bol && after.isPunct("#")) {
-                // a directive line follows the invocation: process it, afterHs stays empty
-                pushBack(substitute(m, args, t, Set.of(), lastCloseParen != null ? lastCloseParen : t));
-                directive(after);
-                return;
-            }
             pending.addFirst(after);
+            // line breaks between invocation and the next token become output newlines
+            for (int k = 0; k < afterNls; k++)
+                pending.addFirst(new Tok(Tok.Kind.NL, "\n", after.line, after.file, true, true));
         }
         pushBack(substitute(m, args, t, afterHs, lastCloseParen != null ? lastCloseParen : t));
     }
@@ -385,7 +402,7 @@ public final class Preprocessor {
     private void doDefine(List<Tok> line) {
         if (line.size() < 2) { fail("bad #define"); return; }
         Tok nameTok = line.get(1);
-        String name = nameTok.text;
+        String name = nameTok.text; // position used for redefinition warnings
         int i = 2;
         List<String> params = new ArrayList<>();
         boolean variadic = false, functionLike = false;
@@ -412,6 +429,21 @@ public final class Preprocessor {
             i++; // skip ')'
         }
         List<Tok> body = new ArrayList<>(line.subList(Math.min(i, line.size()), line.size()));
+        if (!body.isEmpty()) {
+            // tcc strips whitespace before the first body token (pp/15 vs pp/18)
+            Tok f = body.get(0);
+            if (f.ws) body.set(0, new Tok(f.kind, f.text, f.line, f.file, false, f.bol));
+        }
+        Macro prev = macros.get(name);
+        if (prev != null) {
+            boolean same = prev.functionLike == functionLike && prev.params.equals(params)
+                    && prev.body.size() == body.size()
+                    && java.util.stream.IntStream.range(0, body.size())
+                        .allMatch(k -> prev.body.get(k).text.equals(body.get(k).text)
+                                 && prev.body.get(k).kind == body.get(k).kind);
+            if (!same)
+                System.err.println(nameTok.file + ":" + nameTok.line + ": warning: " + name + " redefined");
+        }
         macros.put(name, new Macro(params, variadic, functionLike, body));
     }
 
@@ -542,6 +574,7 @@ public final class Preprocessor {
             if (b.hs != null) s.addAll(b.hs);
             s.add(name);
             c.hs = Set.copyOf(s);
+            if (c.kind == Tok.Kind.PUNCT && c.text.equals("##")) c.pasteOp = true;
             sub.add(c);
         }
         return sub;
@@ -614,7 +647,7 @@ public final class Preprocessor {
             }
             if (!hidden(t, t.text)) {
                 if (!m.functionLike) {
-                    List<Tok> sub = pasteTokens(applyHideset(m.body, t.text, t, null), null, false);
+                    List<Tok> sub = adoptInvokeWs(pasteTokens(applyHideset(m.body, t.text, t, null), null, false), t);
                     work.remove(i);
                     work.addAll(i, sub);
                     continue; // rescan
@@ -703,8 +736,14 @@ public final class Preprocessor {
         }
         Map<String, List<Tok>> expanded = new HashMap<>();
         for (String p : amap.keySet()) {
-            if (rawUse.contains(p)) expanded.put(p, amap.get(p));
-            else expanded.put(p, expandAll(new ArrayList<>(amap.get(p))));
+            if (rawUse.contains(p)) {
+                expanded.put(p, amap.get(p));
+            } else {
+                // tcc nested_list scope rule (tccpp.c:3229-3232): a macro's hideset
+                // expires when its replay frame ends, so arg prescan runs with each
+                // token's own hideset only; recursion control happens on the RESULT
+                expanded.put(p, expandAll(new ArrayList<>(amap.get(p))));
+            }
         }
         // substitute; empty args become placemarkers so ## behaves per C11
         List<Tok> res = new ArrayList<>();
@@ -722,21 +761,30 @@ public final class Preprocessor {
             if (b.kind == Tok.Kind.IDENT && amap.containsKey(b.text)) {
                 List<Tok> arg = expanded.get(b.text);
                 if (arg.isEmpty()) res.add(new Tok(Tok.Kind.PUNCT, PM, b.line, b.file, b.ws, b.bol));
-                else for (Tok a : arg) {
-                    // args keep their own hideset but adopt the replay position
-                    // (tcc macro replay does not advance the line number)
-                    Tok at = new Tok(a.kind, a.text, posTarget.line, posTarget.file, a.ws, a.bol);
-                    at.hs = a.hs;
-                    res.add(at);
+                else {
+                    boolean first = true;
+                    for (Tok a : arg) {
+                        // Prosser: every token of the substitution result (args included)
+                        // gets the substitution hideset; the first token takes the body
+                        // parameter's leading-whitespace flag
+                        Tok at = new Tok(a.kind, a.text, posTarget.line, posTarget.file,
+                                first ? b.ws : a.ws, a.bol);
+                        Set<String> s = new HashSet<>(a.hs == null ? Set.<String>of() : a.hs);
+                        s.addAll(base);
+                        at.hs = Set.copyOf(s);
+                        res.add(at);
+                        first = false;
+                    }
                 }
                 continue;
             }
             // body token: retarget to the replay position and apply the substitution hideset
             Tok bt = new Tok(b.kind, b.text, posTarget.line, posTarget.file, b.ws, b.bol);
             bt.hs = base;
+            bt.pasteOp = b.isPunct("##");
             res.add(bt);
         }
-        return pasteTokens(res, base, m.variadic);
+        return adoptInvokeWs(pasteTokens(res, base, m.variadic), callSite);
     }
 
     /** ## token pasting over a substituted body (placemarker-aware). tcc also pastes
@@ -745,7 +793,7 @@ public final class Preprocessor {
         List<Tok> pasted = new ArrayList<>();
         for (int k = 0; k < res.size(); k++) {
             Tok t = res.get(k);
-            if (t.isPunct("##") && k + 1 < res.size()) {
+            if (t.isPunct("##") && t.pasteOp && k + 1 < res.size()) {
                 Tok nx = res.get(k + 1);
                 Tok left = pasted.isEmpty() ? null : pasted.get(pasted.size() - 1);
                 boolean leftPm = left != null && left.isPunct(PM);

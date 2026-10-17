@@ -96,7 +96,7 @@ public final class Lexer {
             physLine++;
             boolean wasB = atBol;
             atBol = true;
-            pendingWs = true;
+            pendingWs = false; // ws means "whitespace since previous token on the same line"
             return new Tok(Tok.Kind.NL, "\n", reported(), logicalName, ws, wasB);
         }
         boolean bol = atBol;
