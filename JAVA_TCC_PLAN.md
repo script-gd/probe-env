@@ -53,6 +53,8 @@
 - **估**：5-6k 行 Java。
 - **风险**：`decl()`/`unary()`/`gexpr()` 的交织递归、初始化器的 `decl_designator` 状态机、VLA 的 token 回放（`begin_macro`/`end_macro` 已在预处理器有等价物可复用）。
 
+**M2 当前状态（2026-10-18）**：解析器骨架已落地（`jtcc.cc.Parser`/`CType`/`Sym`/`ConstEval` + `jtcc.ctok.CTokenizer`，忠实对应 tccgen.c 的 `decl`/`type_decl`/`post_type`/`block`/表达式优先级链结构）。**tests2 范围内 122/122 全部解析接受、fixture 5/5 全部解析通过**（CI 门控：`scripts/check-parse-accept.sh`）。剩余 M2 深度工作：诊断消息逐字对齐（60/96 用例的告警文本）、`_Static_assert` 在 M2 降级为警告（因无类型布局，M3 恢复严格）、初始化器的语义化解析（当前为跳过式）、结构体字段表构建。
+
 ### M3 — x86_64 代码生成
 
 移植 `x86_64-gen.c` + `tccgen.c` 的代码生成一半（`gv/gv2/gen_op/gstore/gjmp`、SValue 栈机、寄存器分类 `reg_classes`、SysV AMD64 ABI 分类与 `gfunc_call/gfunc_prolog/gfunc_epilog`、struct 值传递/返回、`__builtin_va_*` 与 `__va_arg`、VLA 的 `gen_vla_*`、原子内建降级为 `__atomic_*` 助手调用）。
