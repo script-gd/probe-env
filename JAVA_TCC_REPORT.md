@@ -6,13 +6,13 @@
 
 **技术上可行，但属于大型工程；本轮已完成可行性验证与首个里程碑。**
 
-- **范围可以收敛**：gdcc 只用 libtcc 的 10 个 API、固定 `-std=c11`、只产出 `.o` 与共享库，不用 JIT/内存执行/交叉编译。删掉 JIT、Windows PE、32 位后端、调试信息后（**保留 ELF + Mach-O 双格式**以覆盖 Linux/Android/macOS），需要移植的 C 代码约 **2.8 万行**（含 x86_64+arm64 双后端、内联汇编与 Mach-O dylib 产出），而非完整 tinycc 的约 6.9 万行。
+- **范围可以收敛**：gdcc 只用 libtcc 的 10 个 API、固定 `-std=c11`、只产出 `.o` 与共享库，不用 JIT/内存执行/交叉编译。删掉 JIT、32 位后端、调试信息后（**保留 ELF + Mach-O + PE 三种格式**以覆盖 Linux/Android/macOS/Windows），需要移植的 C 代码约 **3.1 万行**（含 x86_64+arm64 双后端、内联汇编与 Mach-O/PE 共享库产出），而非完整 tinycc 的约 6.9 万行。
 - **本轮 PoC 已验证最难的单点之一**：用 Java 重写的词法器+预处理器（`jtcc/`，约 1000 行）在完整 gdcc 输出项目（5 个编译单元，含 glibc 系统头与全部 GNU 扩展）上与 vendored tcc 的 `tcc -E` 输出**逐 token 完全一致（合计 856,800 个 token）**，并通过 gdcc 的 u8 字面量全部边界用例。
-- **最小保留集已实证自洽**：本分支 `vendor/tinycc/` 只保留移植必需文件，用 `ONE_SOURCE=0` + 26 个调试桩函数即可构建出能工作的 tcc；在 Linux 上把完整 fixture 编译链接为可 `dlopen` 的 x86-64 `.so`，**并在 Apple Silicon macOS 上编译链接出通过 `codesign -v` 且可 `dlopen` 的 arm64 `.dylib`**（[CI #39050925391](https://github.com/script-gd/probe-env/actions/runs/39050925391)，Linux + macOS 双绿）。
+- **最小保留集已实证自洽**：本分支 `vendor/tinycc/` 只保留移植必需文件，用 `ONE_SOURCE=0` + 26 个调试桩函数即可构建出能工作的 tcc；在 Linux 上把完整 fixture 编译链接为可 `dlopen` 的 x86-64 `.so`，在 Apple Silicon macOS 上产出通过 `codesign -v` 且可 `dlopen` 的 arm64 `.dylib`，并以 Linux 交叉构建的 PE tcc 产出在 Windows 上 `LoadLibrary` 成功的 x86-64 `.dll`（[CI #39052382088](https://github.com/script-gd/probe-env/actions/runs/39052382088)，Linux + macOS + Windows 三端绿）。
 - **主要风险**：解析器+通用代码生成器 `tccgen.c`（9049 行）是最大单体；`minicoro.h` 的协程上下文切换在 Linux x86_64/arm64 与 macOS arm64 上依赖**文件级 `__asm__` 块**，Java 版不能砍掉汇编器，或需改用预编译字节 blob（Windows 路径已有先例）；Mach-O 的 dyld bind/rebase 编码与导出 trie 是独立的一套链接器逻辑（与 ELF 的 `.dynsym` 模型不同）；aarch64 ELF 使用 `SHT_REL` 隐式加数重定位，与 x86_64 的 `SHT_RELA` 不同。
 - **架构上 Java 版有一个真实优势**：C 版 tcc 通过 `tcc.h:366-393` 的 `#include` 机制只能编译进**单一目标后端**（gdcc 因此拒绝交叉编译）；Java 版可同时持有 x86_64 与 arm64 两个后端，一次运行按目标分发——这正是 gdcc 接入 Android 所需要的。
 
-**建议**：可行但应按阶段推进（见 §8），先落地 x86_64 ELF 单后端打通端到端，再补 arm64 ELF 与 arm64 Mach-O（macOS dylib 的增量约 2.4k 行 C 移植量，详见 §6.2）。若目标只是"在 Android 上编译 gdcc 输出"，另有一个量级更小的备选方案见 §9。
+**建议**：可行但应按阶段推进（见 §8），先落地 x86_64 ELF 单后端打通端到端，再补 arm64 ELF、arm64 Mach-O 与 x86_64 PE（Mach-O 增量约 2.4k、PE 增量约 2.1k 行 C 移植量，详见 §6.2/§6.3）。若目标只是"在 Android 上编译 gdcc 输出"，另有一个量级更小的备选方案见 §9。
 
 ## 2. 输入与验证范围
 
@@ -49,6 +49,7 @@ Java 重写要复刻的对外行为因此只有：**多次"源文件→.o"** 和
 | 解析+通用代码生成 | `tccgen.c` | 9,049 | 最大单体，移植主战场 |
 | ELF 输出+链接器 | `tccelf.c` | 4,215 | `.o`/`.so` 写出、GOT/PLT、重定位；同时是 Mach-O 的共享链接核心（见 §6.2） |
 | Mach-O 输出+加载 | `tccmacho.c` | 2,477 | dylib 写出（dyld bind/rebase、导出 trie、LC_ID_DYLIB）、`.dylib`/`.tbd` 加载 |
+| PE 输出+加载 | `tccpe.c` | 2,304 | dll 写出（导入/导出表、`.reloc`、`.tls`、`.pdata`）、`.def`/`.dll` 导入解析 |
 | 驱动/API/分配器 | `libtcc.c` | 2,253 | Java 版大部分可用 OO 状态重写 |
 | 汇编器（共享） | `tccasm.c` | 1,525 | **必需**（见 §6.1），子代理原判 OPTIONAL 已修正 |
 | x86_64 后端 | `x86_64-gen.c` + `x86_64-link.c` | 2,690 | |
@@ -57,10 +58,11 @@ Java 重写要复刻的对外行为因此只有：**多次"源文件→.o"** 和
 | arm64 汇编 | `arm64-asm.c` + `arm64-tok.h` | 3,116 | minicoro 需要 |
 | 头文件 | `tcc.h`/`libtcc.h`/`tcctok.h`/`elf.h`/`dwarf.h`/`stab.h`/`stab.def` | 6,591 | `elf.h` 3,325 行多为常量，Java 只需用到的子集 |
 | 运行时（数据） | `include/*.h`（11 个）+ `lib/` 的 `libtcc1.a` 源（10 个文件） | ~5,400 | **不重写**，作为资源嵌入；`libtcc1.a` 可预编译为 `.o` 数据 |
+| Windows 数据 | `win32/include/`（CRT/winapi 头，1.5MB）+ `win32/lib/` 的 5 个 `.def` 与 `dllcrt1.c`/`dllmain.c`/`crtinit.c`/`chkstk.S` | — | **不重写**，作为资源嵌入（与 gdcc 现行 bundle 一致） |
 
-**已删除**：`tccrun.c`（JIT）、`tccdbg.c`（DWARF/stabs，留 26 个空桩）、`tccpe.c`/`tcccoff.c`（Windows）、`tcc.c`/`tcctools.c`（CLI/ar，Java 驱动替代）、`il-gen.c`、i386/arm/c67/riscv64 全部后端、`win32/` 整树、`lib/bcheck.c`/`bt-*`/`tcov.c`/`runmain.c`（仅 JIT/调试用）。**`tccmacho.c` 保留**（macOS dylib 需求，见 §6.2）。
+**已删除**：`tccrun.c`（JIT）、`tccdbg.c`（DWARF/stabs，留 26 个空桩）、`tcccoff.c`（C67 专用，与 PE 无关——`libtcc.c:47` 仅在 `TCC_TARGET_C67` 下包含它）、`tcc.c`/`tcctools.c`（CLI/ar，Java 驱动替代）、`il-gen.c`、i386/arm/c67/riscv64 全部后端、`win32/` 的可执行 CRT（`crt1.c`/`crt1w.c`，DLL-only 不需要）、`lib/bcheck.c`/`bt-*`/`tcov.c`/`runmain.c`（仅 JIT/调试用）。**`tccmacho.c` 与 `tccpe.c` 保留**（§6.2/§6.3）。
 
-可移植净量：**核心 19,489 + Mach-O 2,477 + 双后端 5,377 + 双汇编器 5,757 ≈ 33.1k 行 C**（不含头文件常量表）；若先只做 x86_64 ELF 单后端 ≈ **25.8k 行**。本分支用 `ONE_SOURCE=0` + 桩文件从该集合构建出 Linux x86_64 与 macOS arm64 两个可用 tcc 并通过 fixture 全量编译——证明集合无遗漏。
+可移植净量：**核心 19,489 + Mach-O 2,477 + PE 2,304 + 双后端 5,377 + 双汇编器 5,757 ≈ 35.4k 行 C**（不含头文件常量表与数据文件）；若先只做 x86_64 ELF 单后端 ≈ **25.8k 行**。本分支用 `ONE_SOURCE=0` + 桩文件从该集合构建出 Linux x86_64、macOS arm64、Windows x86_64 三个目标的可用 tcc 并全部通过 fixture 全量编译——证明集合无遗漏。
 
 关键接口（移植时的模块边界）：
 
@@ -86,7 +88,7 @@ Java 重写要复刻的对外行为因此只有：**多次"源文件→.o"** 和
 `fixture/include/gdcc/minicoro.h:823-877`（x86_64）与 `:1233,:1276`（aarch64）在 Linux + tcc 下用**文件级 `__asm__`** 实现协程上下文切换（`_mco_wrap_main`/`_mco_switch`），无法用纯 C 表达。两个选项：
 
 - **移植 tcc 的汇编器路径**（`tccasm.c` + 双架构汇编器，+5.7k 行）；
-- **改走 Windows 同款方案**：minicoro 在 Windows 已用 `__attribute__((section(".text")))` + 预编译字节 blob，Java 版可对 ELF 目标同样内嵌预汇编字节，把汇编器从必需清单中移除。**推荐后者**，可省约 5.7k 行移植量。
+- **改走 Windows 同款方案**：minicoro 在 Windows 已用 `__attribute__((section(".text")))` + 预编译字节 blob，Java 版可对 ELF/Mach-O 目标同样内嵌预汇编字节，把汇编器从必需清单中移除。**推荐后者**，可省约 5.7k 行移植量。（Windows 字节 blob 路径本轮已在 PE dll 实测中随 fixture 编译加载通过，可行性有直接证据。）
 
 ### 6.2 Mach-O dylib 的增量工作（macOS 支持）
 
@@ -108,15 +110,38 @@ Java 重写要复刻的对外行为因此只有：**多次"源文件→.o"** 和
 
 **实证**：CI macos-14（Apple Silicon）上，最小保留集 + `tccmacho.c` 构建的 arm64 Mach-O tcc 把完整 fixture 编译为 `libprobe.dylib`（`Mach-O 64-bit dynamically linked shared library arm64`），`codesign -v` 通过，`dlopen` 成功。
 
-### 6.3 链接器不是"toy"（ELF 侧）
+### 6.3 PE/COFF dll 的增量工作（Windows 支持）
+
+保留 `tccpe.c`（2,304 行）后，产出 `.dll` 需要的增量工作项：
+
+**通用中间格式（关键架构事实，已核验）**：`tcc_output_file`（tccelf.c:3223）对 `TCC_OUTPUT_OBJ` **在所有目标上都走 `elf_output_obj`**——gdcc 逐 TU 产出的 `.o` 在 Windows/macOS 上也是 ELF 对象（tcc 的内部 IR），只有最终共享库链接才分格式。Java 移植因此只需一种对象读写器（ELF `.o`），格式后端只管最终 dll/dylib/so 链接与系统库导入解析。
+
+**dll 产出特有的移植内容**：
+- **PE 写出器**：MZ/PE32+ 头、节布局/对齐（`pe_write`/`pe_assign_addresses`，约 700 行）；
+- **导入/导出表**：`pe_build_imports`/`pe_build_exports`（约 250 行）——fixture 经 `__declspec(dllexport)`（`gdcc_helper.h:20`）导出 `gdextension_entry`；
+- **基址重定位 `.reloc` 与 TLS 目录 `.tls`**（`pe_build_reloc`/`pe_build_tls`，约 130 行）——fixture 在 Windows 上用 `__thread` TLS；
+- **`.pdata` unwind 信息**（`pe_add_unwind_info/data`，约 100 行，`x86_64-gen.c:1016` 每函数调用）；
+- **导入解析**：`.def` 文件解析（`pe_load_def`）+ 直接读 PE 导出表（`get_dllexports`/`pe_load_dll`），共约 180 行——用于对 msvcrt/kernel32 等系统库符号解析；
+- **Windows x64 ABI 分支**：`x86_64-gen.c` 的 12 处 `TCC_TARGET_PE` 分支（shadow space、RCX/RDX/R8/R9 参数序、大栈帧 `__chkstk` 调用）；**LLP64**（`tcc.h:416-419`：PE 下 `LONG_SIZE=4`）——类型系统必须按目标参数化；
+- **`__declspec(dllexport/dllimport)` 属性**：`tccgen.c` 的 14 处 PE 分支（共享文件内，已计入核心行数）。
+
+**可删除的 PE 部分**：PDB 生成（`pe_create_pdb`，随调试删除）、`.res` 资源加载（`pe_load_res`）、EXE 专用入口/subsystem 路径。dll 保留集 ≈ **2,100 行**。
+
+**数据文件（不移植）**：`win32/include/`（tcc 自带 CRT+winapi 头，1.5MB，与 gdcc bundle 一致地平铺合并）、5 个 `.def`、`win32/lib/` 的 `dllcrt1.c`/`dllmain.c`/`crtinit.c`（DLL CRT 启动）与 `chkstk.S`（栈探测）。EXE CRT（`crt1.c`/`crt1w.c`/`wincrt1*`/`winex`）删除。`libtcc1.a` 的 PE 变体由 `lib/Makefile` 的 `X86_64_O + chkstk.o + WIN_O` 规则预编译为数据。
+
+**范围便利**：gdcc 只发布 windows-x86_64 bundle，PE 只需 x86_64 后端；且 **minicoro 在 Windows 本就使用预汇编字节 blob**（`_MCO_ASM_BLOB`，见 §6.1），PE 路径不需要内联汇编器（`chkstk.S` 可预编译为数据）。
+
+**实证**：CI 在 Linux 上交叉构建 PE 目标参考 tcc，fixture 5 TU → `probe.dll`（`PE32+ x86-64 DLL`），导出表恰为 `gdextension_entry`，导入表为 `msvcrt.dll`+`kernel32.dll`，含 `.pdata`/`.tls`；windows-latest runner 上 `ctypes.CDLL` 加载成功（LoadLibrary OK）。
+
+### 6.4 链接器不是"toy"（ELF 侧）
 
 `.so` 产出需要 `.dynsym/.dynstr/.hash`、`.dynamic`（DT_NEEDED 等）、GOT/PLT、`.rela.dyn/.rela.plt`、glibc 符号版本（`printf@GLIBC_2.2.5` 式）。tcc 的链接器是自包含子集实现（`tccelf.c` + 两个 `*-link.c`），已包含所需全部逻辑；移植难点在忠实度而非设计。aarch64 用 `SHT_REL`（隐式加数）而 x86_64 用 `SHT_RELA`，两套重定位应用逻辑不同（`R_AARCH64_ADR_PREL_PG_HI21`/`ADD_ABS_LO12_NC`/`CALL26` 等 vs `R_X86_64_PC32/PLT32/GOTPCREL` 等）。好处是：只做 `.so` 不需要 CRT 启动文件（crt1.o/crti.o），与 Android bionic 的命名差异也自然回避。
 
-### 6.4 一个 C 二进制一个后端 vs Java 双后端
+### 6.5 一个 C 二进制一个后端 vs Java 双后端
 
 `tcc.h:366-393` 用 `#include` 把目标后端文本嵌入所有编译单元，`x86_64-gen.c` 与 `arm64-gen.c` 定义同名符号，C 层面互斥。Java 版可将两个后端作为两个类共存，按目标平台分发——直接解决 gdcc 当前"拒绝交叉编译"（`TinyCcCompiler.java:153-156`）与"Android 无 tinycc 后端"两个限制。
 
-### 6.5 其他已识别风险
+### 6.6 其他已识别风险
 
 - **一次通过式架构**：tcc 边解析边产码，无 AST；Java 移植若忠实复刻则行为最可控，若改用 chibicc 式多趟设计则语义漂移风险自担。建议忠实复刻。
 - **TLS**：aarch64 local-exec TLS 在 DSO 中不安全，gdcc 已在 aarch64 走 pthread-key 路径（`minicoro.h:434-456`），Java 版只需保证 `__thread` 解析与 x86_64 路径一致。
@@ -129,20 +154,22 @@ Java 重写要复刻的对外行为因此只有：**多次"源文件→.o"** 和
 
 | 路径 | 内容 |
 | --- | --- |
-| `vendor/tinycc/` | 最小保留集（§4 表中的全部 .c/.h + include/ + lib/ 子集，**含 `tccmacho.c`**），1.6MB |
+| `vendor/tinycc/` | 最小保留集（§4 表中的全部 .c/.h + include/ + lib/ 与 win32/ 子集），3.2MB |
 | `fixture/` | 完整 gdcc C 输出项目（5 TU，与上一轮相同输入） |
 | `jtcc/src/jtcc/` | Java 词法器+预处理器（Tok/Lexer/Preprocessor/Eval/Main，约 1000 行） |
 | `reference-cli/` | 仅参考构建用的 `tcc.c`/`tcctools.c` + 共享调试桩 `stubs.c`（不属于移植集） |
-| `scripts/build-tcc-ref.sh` | Linux：从最小保留集构建参考 tcc（x86_64 ELF，含 u8 探针） |
-| `scripts/build-tcc-ref-macho.sh` | macOS：构建 arm64 Mach-O 参考 tcc 并编译 fixture 为 dylib（含 codesign 验证 + dlopen） |
+| `scripts/build-tcc-ref.sh` | Linux：x86_64 ELF 参考 tcc（含 u8 探针） |
+| `scripts/build-tcc-ref-macho.sh` | macOS：arm64 Mach-O 参考 tcc + fixture dylib（codesign + dlopen） |
+| `scripts/build-tcc-ref-pe.sh` | Linux 交叉：x86_64 PE 参考 tcc + fixture dll（结构校验） |
 | `scripts/check-all.sh` | Linux 端到端校验：fixture→.so + 5 TU 逐 token 对比 |
-| `.github/workflows/jtcc.yml` | Linux（x86_64 ELF 全链路）+ macos-14（arm64 Mach-O dylib）双任务 |
+| `.github/workflows/jtcc.yml` | 4 个任务：Linux ELF 全链路+parity、macos-14 dylib、Linux PE 交叉构建、windows-latest dll 加载 |
 
-实测结果（[CI #39050925391](https://github.com/script-gd/probe-env/actions/runs/39050925391) 等，双平台绿）：
+实测结果（[CI #39052382088](https://github.com/script-gd/probe-env/actions/runs/39052382088)，四任务全绿）：
 
 1. 最小保留集构建出的 tcc 通过 gdcc u8 探针（Linux）；
-2. Linux x86_64：fixture → `libprobe.so`（ELF，24 个未定义 libc 符号），`dlopen` 成功；
-3. **macOS arm64（Apple Silicon）：fixture → `libprobe.dylib`（Mach-O arm64），`codesign -v` 通过，`dlopen` 成功**；
+2. Linux x86_64：fixture → `libprobe.so`（ELF），`dlopen` 成功；
+3. macOS arm64（Apple Silicon）：fixture → `libprobe.dylib`（Mach-O arm64），`codesign -v` 通过，`dlopen` 成功；
+4. Windows x86_64：fixture → `probe.dll`（PE32+），导出 `gdextension_entry`、导入 `msvcrt.dll`+`kernel32.dll`、含 `.pdata`/`.tls`，windows-latest 上 `LoadLibrary` 成功；
 3. Java 预处理器对 5 个 TU 的输出与 `tcc -E` **逐 token 一致**：entry 103,524 / godot_binding 531,575 / minicoro 10,647 / gdcc_coroutine 104,054 / gdcc_hrx 107,400，合计 **856,800 tokens，0 差异**；
 4. 对抗性探针（u8 邻接/`u8##"paste"`/`#define u8 "macro"` 遮蔽/`#undef` 恢复/字符串化含转义/自引用宏/`#if defined` 组合/8KiB+ 多字节字符串）全部一致。
 
@@ -164,9 +191,10 @@ Java 重写要复刻的对外行为因此只有：**多次"源文件→.o"** 和
 | M5 | ELF `.so` 链接（GOT/PLT/重定位/dynsym，共享链接核心）→ fixture 链接为可 `dlopen` 的 `.so` | ~2-2.5k 行 | 未开始 |
 | M6 | arm64 ELF 后端+链接（字节 blob 替代汇编器的前提下） | ~2.5-3k 行 | 未开始 |
 | M7 | Mach-O dylib 产出（`tccmacho.c` 移植：bind/rebase、导出 trie、LC_ID_DYLIB、`.tbd` 解析；codesign 走 `ProcessBuilder`；复用 M5 的共享链接核心与 M6 的 arm64 后端） | ~2.5-3k 行 | 未开始 |
-| M8 | 接入 gdcc（替换 FFM 后端，过 gdcc 测试集与 Android/macOS 实测） | 集成工作 | 未开始 |
+| M8 | PE dll 产出（`tccpe.c` 移植：导入/导出表、`.reloc`/`.tls`/`.pdata`、`.def` 解析；复用 M3 的 x86_64 后端与 Windows ABI 分支；win32 头文件/def/CRT 作数据嵌入） | ~2-2.5k 行 | 未开始 |
+| M9 | 接入 gdcc（替换 FFM 后端，过 gdcc 测试集与 Android/macOS/Windows 实测） | 集成工作 | 未开始 |
 
-**总计估计约 1.7 万–2.2 万行 Java 的忠实移植工作量**（含 Mach-O），其中 M2（解析器）是决定性阶段。M1 的成功（预处理器是公认最难的单点之一）表明忠实移植路线成立，但不能外推解析器的难度——`tccgen.c` 的声明语法、typedef 二义性、语句表达式重放、VLA 机器都比预处理器更复杂。
+**总计估计约 1.9 万–2.4 万行 Java 的忠实移植工作量**（含 Mach-O 与 PE），其中 M2（解析器）是决定性阶段。M1 的成功（预处理器是公认最难的单点之一）表明忠实移植路线成立，但不能外推解析器的难度——`tccgen.c` 的声明语法、typedef 二义性、语句表达式重放、VLA 机器都比预处理器更复杂。
 
 ## 9. 备选方案对比
 
@@ -186,6 +214,7 @@ Java 重写要复刻的对外行为因此只有：**多次"源文件→.o"** 和
 - ✅ `minicoro.h` 文件级 `__asm__`（亲读 `:823-877`）——**修正了 explore 代理把汇编器判为 OPTIONAL 的结论**：对 ELF 目标实为必需，除非采用字节 blob 替代（§6.1）。
 - ✅ `tcc.h` 无条件包含 `dwarf.h`/`stab.h`（构建时报错实证），这两个纯常量头因此保留在 vendor 中。
 - ✅ Mach-O 增量（本轮追加）：`macho_output_file` 驱动 tccelf 共享链接核心（亲数 74 处调用）、`tcc_macho_add_destructor` 手工汇编跳板（minicoro destructor 属性依赖）、`.tbd` 简化文本解析、`libxcselect` SDK 探测、`CONFIG_CODESIGN` 默认开启且经 `system()` 调 `codesign`——均亲读源码确认；dylib 产出链路在 macos-14 CI 实证。
+- ✅ PE 增量（本轮追加）：`tcc_output_file` 对 `TCC_OUTPUT_OBJ` 全目标走 ELF 对象（tccelf.c:3223-3228，通用中间 IR）；`pe_output_file` 无 OBJ 分支（亲读 tccpe.c:2252-2304）；`tcccoff.c` 仅 C67（libtcc.c:47 包含守卫）；LLP64（tcc.h:416-419）；fixture 用 `__declspec(dllexport)`（gdcc_helper.h:20）；dll 链路在 ubuntu 交叉构建 + windows-latest 加载实证。
 - ✅ `tccdefs.h` 在 `-std=c11` 下定义 `__STDC_NO_THREADS__` 等（亲读头文件 + PoC 预处理行为一致）。
 - ⚠️ scout 关于"tcc 在 Linux 不定义 `__GNUC__`"的论断与 fixture 行为自洽（PoC 黄金对齐实证），未再单独复核 `tccdefs.h:131-134` 原文。
 - ⚠️ scout 的外部项目清单（chibicc 各语言移植、C2Eif/mtSystems 等）未逐条复核其当前状态，报告中仅作为规模参照使用。
@@ -194,9 +223,10 @@ Java 重写要复刻的对外行为因此只有：**多次"源文件→.o"** 和
 
 ```bash
 git checkout research/java-tinycc-rewrite
-./scripts/build-tcc-ref.sh         # Linux：从最小保留集构建参考 tcc（tmp/ 内，不污染环境）
+./scripts/build-tcc-ref.sh         # Linux：x86_64 ELF 参考 tcc（tmp/ 内，不污染环境）
 ./scripts/check-all.sh             # Linux：fixture→.so + jtcc/tcc -E 逐 token 对比
 ./scripts/build-tcc-ref-macho.sh   # macOS arm64：fixture→.dylib + codesign + dlopen
+./scripts/build-tcc-ref-pe.sh      # Linux 交叉：x86_64 PE 参考 tcc + fixture→probe.dll
 ```
 
-临时产物全部在 `tmp/`（已 gitignore）。未修改 `../gdcc`，未在宿主安装任何软件（JDK/gcc/python3 为既有环境），重工具链验证在 GitHub Actions 完成（Linux x86_64 + macOS arm64 双 runner）。
+临时产物全部在 `tmp/`（已 gitignore）。未修改 `../gdcc`，未在宿主安装任何软件（JDK/gcc/python3 为既有环境），重工具链验证在 GitHub Actions 完成（Linux x86_64、macOS arm64、Windows x86_64 三端 runner）。
