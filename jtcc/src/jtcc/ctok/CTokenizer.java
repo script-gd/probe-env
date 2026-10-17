@@ -25,7 +25,7 @@ public final class CTokenizer {
             "__builtin_constant_p","__builtin_frame_address","__builtin_return_address","__builtin_expect",
             "__builtin_va_start","__builtin_va_arg","__builtin_va_end","__builtin_va_copy","__builtin_va_arg_types",
             "__builtin_types_compatible_p","__builtin_choose_expr","__builtin_unreachable","__builtin_trap",
-            "__noreturn__","__aligned__","__packed__","__label__","__FUNCTION__","__PRETTY_FUNCTION__","__func__",
+            "__noreturn__","__aligned__","__packed__","__label__","typeof","__FUNCTION__","__PRETTY_FUNCTION__","__func__",
         };
         for (String k : kw) KEYWORDS.put(k, k);
     }
@@ -80,7 +80,7 @@ public final class CTokenizer {
         int start = i;
         char t0 = ch;
         if (i + 1 < s.length()) { i++; ch = s.charAt(i); }
-        intDigits.append(t0);
+        if (t0 != '.') intDigits.append(t0);
         if (t0 == '0' && (ch == 'x' || ch == 'X' || ch == 'b' || ch == 'B')) {
             intDigits.setLength(0);
             base = (ch == 'x' || ch == 'X') ? 16 : 2;
@@ -93,19 +93,16 @@ public final class CTokenizer {
             i++;
             ch = i < s.length() ? s.charAt(i) : 0;
         }
-        boolean hexFloatSep = ch == '.' || (base == 10 && (ch == 'e' || ch == 'E'))
+        boolean hexFloatSep = t0 == '.' || ch == '.' || (base == 10 && (ch == 'e' || ch == 'E'))
                 || ((base == 16 || base == 2) && (ch == 'p' || ch == 'P'));
         if (hexFloatSep) {
-            // float: delegate decimal to Java, translate hex to Java's hex-float syntax
+            // float: the lexer already maximal-munched the pp-number; strip one trailing
+            // f/F/l/L suffix, then parse the mantissa (hex floats incl. a-f digits)
             String rest = s.substring(start);
-            int e = 0;
-            while (e < rest.length()) {
-                char c = rest.charAt(e);
-                if (Character.isLetterOrDigit(c) || c == '.' || c == '+' || c == '-') { e++; continue; }
-                break;
-            }
+            char suffix = 0;
+            int e = rest.length();
+            if (e > 0 && "fFlL".indexOf(rest.charAt(e - 1)) >= 0) { suffix = rest.charAt(e - 1); e--; }
             String mant = rest.substring(0, e);
-            char suffix = e < rest.length() ? rest.charAt(e) : 0;
             CTok ct = new CTok(CTok.Kind.CDOUBLE, t.text, t.line, t.file);
             try {
                 double dv;
@@ -136,7 +133,7 @@ public final class CTokenizer {
             if (d < 0 || d >= base) dg.error(t.file, t.line, "invalid digit");
             long n1 = n;
             n = n * base + d;
-            if (Long.compareUnsigned(n1, 0x1000000000000000L) >= 0 && n / base != n1) ov = true;
+            if (Long.compareUnsigned(n1, 0x1000000000000000L) >= 0 && Long.divideUnsigned(n, base) != n1) ov = true;
         }
         int lcount = 0, ucount = 0;
         while (i < s.length()) {
@@ -179,7 +176,9 @@ public final class CTokenizer {
             if (!m.startsWith("0x") && !m.startsWith("0X")) m = "0x" + m;
             return Double.parseDouble(m);
         }
-        // binary float 0b1.01p3: expand to hex manually (rare; tcc extension)
+        // binary float 0b1.01p3: expand manually (rare; tcc extension)
+        if (m.length() > 1 && m.charAt(0) == '0' && (m.charAt(1) == 'b' || m.charAt(1) == 'B')) m = m.substring(2);
+        if (!m.isEmpty() && "fFlL".indexOf(m.charAt(m.length() - 1)) >= 0) m = m.substring(0, m.length() - 1);
         int p = Math.max(m.indexOf('p'), m.indexOf('P'));
         String mantDigits = p >= 0 ? m.substring(0, p) : m;
         int exp = p >= 0 ? Integer.parseInt(m.substring(p + 1)) : 0;

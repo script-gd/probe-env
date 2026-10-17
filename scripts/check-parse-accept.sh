@@ -24,4 +24,15 @@ while read -r name; do
 done < "$BASELINE"
 echo "baseline-parse: pass=$pass fail=$fail (baseline size $(grep -c . "$BASELINE"))"
 if [ $fail -gt 0 ]; then printf 'regressed: %s\n' "${regress[@]}"; exit 1; fi
+
+# the fixture gate: all 5 TUs of the complete gdcc output project must parse cleanly
+for tu in fixture/entry.c fixture/include/godot/godot_binding.c fixture/include/gdcc/minicoro.c fixture/include/gdcc/gdcc_coroutine.c fixture/include/gdcc/gdcc_hrx.c; do
+  if ! timeout 60 java -cp "$ROOT/tmp/classes" jtcc.Main cc "$ROOT/$tu" \
+      -I"$ROOT/fixture/include/gdcc" -I"$ROOT/fixture/include/godot" \
+      --sys="$ROOT/tmp/tcc-ref/include" --sys=/usr/include/x86_64-linux-gnu --sys=/usr/include \
+      >/dev/null 2>&1; then
+    echo "fixture REGRESSION: $tu"; exit 1
+  fi
+done
+echo "fixture-parse: 5/5 OK"
 echo "OK: no regressions vs baseline"

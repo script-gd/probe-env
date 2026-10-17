@@ -10,8 +10,9 @@ public final class CType implements Cloneable {
             VT_CONSTANT = 0x0100, VT_VOLATILE = 0x0200, VT_RESTRICT = 0x0400, VT_ATOMIC = VT_VOLATILE,
             VT_VLA = 0x0800, VT_LONG = 0x1000;
     // storage
-    public static final int VT_EXTERN = 0x00000080, VT_STATIC = 0x00000100, VT_TYPEDEF = 0x00000200,
-            VT_INLINE = 0x00000400, VT_STORAGE = VT_EXTERN | VT_STATIC | VT_TYPEDEF | VT_INLINE;
+    // storage (tcc.h:1072-1075 — must not collide with qualifier bits)
+    public static final int VT_EXTERN = 0x00002000, VT_STATIC = 0x00004000, VT_TYPEDEF = 0x00008000,
+            VT_INLINE = 0x00010000, VT_STORAGE = VT_EXTERN | VT_STATIC | VT_TYPEDEF | VT_INLINE;
     public static final int VT_QUAL = VT_CONSTANT | VT_VOLATILE | VT_RESTRICT;
     public static final int VT_STRUCT_SHIFT = 20;
     public static final int VT_BITFIELD = 1 << (VT_STRUCT_SHIFT + 12);
