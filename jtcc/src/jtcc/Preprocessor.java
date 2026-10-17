@@ -39,6 +39,9 @@ public final class Preprocessor {
     private long ppCounter = 0;
     private String baseFile;
     private String error;
+    /** __TCC_PP__ is defined only in -E mode (tccpp.c:3612) — tccdefs.h hides its
+     *  builtin section behind #ifndef __TCC_PP__. */
+    public boolean ppOnly;
 
     private static final class FileState {
         final Lexer lexer;
@@ -108,7 +111,7 @@ public final class Preprocessor {
         pre.append("#define __TINYC__ 928\n");
         pre.append("#define __x86_64__ 1\n#define __x86_64 1\n#define __amd64__ 1\n");
         pre.append("#define __linux__ 1\n#define __linux 1\n#define __unix__ 1\n#define __unix 1\n");
-        pre.append("#define __TCC_PP__ 1\n");
+        if (ppOnly) pre.append("#define __TCC_PP__ 1\n");
         pre.append("#define __SIZEOF_POINTER__ 8\n#define __SIZEOF_LONG__ 8\n");
         pre.append("#define __STDC__ 1\n#define __STDC_HOSTED__ 1\n#define __STDC_VERSION__ 201112L\n");
         pre.append("#include <tccdefs.h>\n");

@@ -31,6 +31,9 @@ jobs:
       - name: tinycc pp tests (jtcc Java preprocessor)
         run: ./scripts/run-pp-tests.sh jtcc tmp/classes tmp/tcc-ref tmp/pp-jtcc-out
 
+      - name: M2 parser parse-acceptance gate (89-test baseline)
+        run: ./scripts/check-parse-accept.sh
+
       - name: Smoke-test the produced shared library
         run: python3 -c "import ctypes; ctypes.CDLL('tmp/tcc-ref/libprobe.so'); print('dlopen OK')"
 

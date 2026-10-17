@@ -29,6 +29,7 @@ public final class Main {
                     else if (a.startsWith("--sys=")) sys.add(a.substring(6));
                 }
                 Preprocessor pp = new Preprocessor(inc, sys);
+                pp.ppOnly = true;
                 pp.process(file);
                 if (pp.error() != null) {
                     System.err.println("jtcc: error: " + pp.error());
@@ -52,6 +53,40 @@ public final class Main {
                     if (t.kind == Tok.Kind.NL) continue;
                     o.println(t.dump());
                 }
+                break;
+            }
+            case "cc": {
+                // compile driver (parse-only for now): jtcc cc file.c -I<dir>... --sys=<dir>...
+                Path file = Path.of(argv[1]);
+                List<String> inc = new ArrayList<>();
+                List<String> sys = new ArrayList<>();
+                for (int i = 2; i < argv.length; i++) {
+                    String a = argv[i];
+                    if (a.startsWith("-I")) inc.add(a.substring(2));
+                    else if (a.startsWith("--sys=")) sys.add(a.substring(6));
+                }
+                Preprocessor pp = new Preprocessor(inc, sys);
+                // NOTE: cc mode must NOT define __TCC_PP__ (tccdefs.h hides builtins behind it)
+                pp.process(file);
+                if (pp.error() != null) {
+                    System.err.println("jtcc: error: " + pp.error());
+                    System.exit(2);
+                }
+                int[] errors = {0};
+                List<jtcc.ctok.CTok> ctoks = jtcc.ctok.CTokenizer.convert(pp.output(), new jtcc.ctok.CTokenizer.Diag() {
+                    public void error(String f, int l, String m) { System.err.println(f + ":" + l + ": error: " + m); errors[0]++; }
+                    public void warn(String f, int l, String m) { System.err.println(f + ":" + l + ": warning: " + m); }
+                });
+                jtcc.cc.Parser p = new jtcc.cc.Parser(ctoks, new jtcc.cc.Parser.Diag() {
+                    public void error(String f, int l, String m) { System.err.println(f + ":" + l + ": error: " + m); errors[0]++; }
+                    public void warn(String f, int l, String m) { System.err.println(f + ":" + l + ": warning: " + m); }
+                }, new jtcc.cc.StubGen());
+                try {
+                    p.compile();
+                } catch (jtcc.cc.Parser.ParseError e) {
+                    // error already reported
+                }
+                if (errors[0] > 0) System.exit(1);
                 break;
             }
             case "cmp": {
