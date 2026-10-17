@@ -24,3 +24,11 @@ jobs:
 
       - name: Smoke-test the produced shared library
         run: python3 -c "import ctypes; ctypes.CDLL('tmp/tcc-ref/libprobe.so'); print('dlopen OK')"
+
+  macho-dylib:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build reference arm64 Mach-O tcc from keep-set and compile fixture to .dylib
+        run: ./scripts/build-tcc-ref-macho.sh
