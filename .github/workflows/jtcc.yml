@@ -1,0 +1,26 @@
+name: java-tinycc
+
+on:
+  push:
+    branches: [research/java-tinycc-rewrite]
+  pull_request:
+
+jobs:
+  keep-set-and-parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Build reference tcc from the minimal vendor keep-set
+        run: ./scripts/build-tcc-ref.sh
+
+      - name: Compile fixture to .so and check jtcc/tcc -E token parity
+        run: ./scripts/check-all.sh
+
+      - name: Smoke-test the produced shared library
+        run: python3 -c "import ctypes; ctypes.CDLL('tmp/tcc-ref/libprobe.so'); print('dlopen OK')"
