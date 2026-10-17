@@ -19,7 +19,7 @@ public final class Main {
         if (argv.length < 2) { usage(); return; }
         String mode = argv[0];
         switch (mode) {
-            case "pp": {
+            case "pp": case "pptext": {
                 Path file = Path.of(argv[1]);
                 List<String> inc = new ArrayList<>();
                 List<String> sys = new ArrayList<>();
@@ -34,8 +34,12 @@ public final class Main {
                     System.err.println("jtcc: error: " + pp.error());
                     System.exit(2);
                 }
-                PrintStream o = System.out;
-                for (Tok t : pp.output()) o.println(t.dump());
+                if (mode.equals("pptext")) {
+                    System.out.print(pp.outputText());
+                } else {
+                    PrintStream o = System.out;
+                    for (Tok t : pp.output()) o.println(t.dump());
+                }
                 break;
             }
             case "lex": {

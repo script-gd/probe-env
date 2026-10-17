@@ -64,6 +64,40 @@ public final class Preprocessor {
     public String error() { return error; }
     public List<Tok> output() { return out; }
 
+    /** Emit preprocessed text in `tcc -E -P` style: original whitespace preserved via ws
+     *  flags, plus anti-merge spaces per tcc's pp_need_space rule; one logical line per
+     *  source line. */
+    public String outputText() {
+        StringBuilder sb = new StringBuilder();
+        Tok prev = null;
+        int prevLine = -1;
+        for (Tok t : out) {
+            if (prev != null) {
+                if (t.line != prevLine) { sb.append('\n'); prev = null; }
+            }
+            if (prev != null && (t.ws || needSpace(prev, t))) sb.append(' ');
+            sb.append(t.text);
+            prev = t;
+            prevLine = t.line;
+        }
+        if (prev != null) sb.append('\n');
+        return sb.toString();
+    }
+
+    /** tccpp.c pp_need_space equivalent: prevent accidental token pasting in -E output. */
+    private static boolean needSpace(Tok a, Tok b) {
+        boolean wa = a.kind == Tok.Kind.IDENT || a.kind == Tok.Kind.PPNUM
+                || a.kind == Tok.Kind.STRING || a.kind == Tok.Kind.CHARCONST;
+        boolean wb = b.kind == Tok.Kind.IDENT || b.kind == Tok.Kind.PPNUM
+                || b.kind == Tok.Kind.STRING || b.kind == Tok.Kind.CHARCONST;
+        if (wa && wb) return true;
+        char la = a.text.charAt(a.text.length() - 1);
+        if ((la == 'e' || la == 'E') && a.kind == Tok.Kind.PPNUM && (b.isPunct("+") || b.isPunct("-"))) return true;
+        if (a.isPunct("+") && (b.isPunct("++") || b.isPunct("+"))) return true;
+        if (a.isPunct("-") && (b.isPunct("--") || b.isPunct("-"))) return true;
+        return false;
+    }
+
     private boolean active() {
         for (CondFrame f : cond) if (!f.active) return false;
         return true;
@@ -117,19 +151,133 @@ public final class Preprocessor {
 
     private void run() {
         try {
-            Tok t;
-            while ((t = nextRaw()) != null) {
-                if (t.kind == Tok.Kind.NL) continue;
-                if (t.bol && t.isPunct("#")) {
-                    directive(t);
-                    continue;
+            for (;;) {
+                Tok t = pending.poll();
+                boolean fromStream = false;
+                if (t == null) {
+                    t = nextRaw();
+                    if (t == null) break;
+                    fromStream = true;
                 }
-                if (!active()) { skipToNextDirective(t); continue; }
-                expandTop(t);
+                if (fromStream) {
+                    if (t.kind == Tok.Kind.NL) continue;
+                    if (t.bol && t.isPunct("#")) { directive(t); continue; }
+                    if (!active()) { skipToNextDirective(t); continue; }
+                }
+                expandTok(t);
             }
         } catch (PpError e) {
             // recorded in error()
         }
+    }
+
+    /** Expansion-produced tokens awaiting rescanning (the unified tcc-style token stream). */
+    private final ArrayDeque<Tok> pending = new ArrayDeque<>();
+
+    private Tok pull() {
+        Tok t = pending.poll();
+        lastPullFromStream = (t == null);
+        if (t == null) t = nextRaw();
+        return t;
+    }
+    private boolean lastPullFromStream;
+
+    private void pushBack(List<Tok> toks) {
+        for (int k = toks.size() - 1; k >= 0; k--) pending.addFirst(toks.get(k));
+    }
+
+    /** Expand one token of the main stream; macro substitution results are rescanned via pending. */
+    private void expandTok(Tok t) {
+        if (t.kind != Tok.Kind.IDENT) { out.add(t); return; }
+        Macro m0 = macros.get(t.text);
+        if (m0 != null) { expandMacroTok(t, m0); return; }
+        switch (t.text) {
+            case "__FILE__":
+                out.add(t.withKindText(Tok.Kind.STRING, "\"" + t.file.replace("\\", "\\\\").replace("\"", "\\\"") + "\""));
+                return;
+            case "__LINE__":
+                out.add(t.withKindText(Tok.Kind.PPNUM, Integer.toString(t.line)));
+                return;
+            case "__BASE_FILE__":
+                out.add(t.withKindText(Tok.Kind.STRING, "\"" + baseFile.replace("\\", "\\\\").replace("\"", "\\\"") + "\""));
+                return;
+            case "__COUNTER__":
+                out.add(t.withKindText(Tok.Kind.PPNUM, Long.toString(ppCounter++)));
+                return;
+            case "__DATE__":
+                out.add(t.withKindText(Tok.Kind.STRING, "\"Jan  1 1970\""));
+                return;
+            case "__TIME__":
+                out.add(t.withKindText(Tok.Kind.STRING, "\"00:00:00\""));
+                return;
+            default:
+        }
+        out.add(t); return;
+    }
+
+    private void expandMacroTok(Tok t, Macro m) {
+        if (hidden(t, t.text)) { out.add(t); return; }
+        if (!m.functionLike) {
+            pushBack(pasteTokens(applyHideset(m.body, t.text, t, null), null, false));
+            return;
+        }
+        // function-like: pull next token (skipping NLs) from pending or stream
+        Tok open = pull();
+        while (open != null && open.kind == Tok.Kind.NL) open = pull();
+        if (open == null || !open.isPunct("(") || hidden(open, t.text)) {
+            out.add(t);
+            if (open != null) {
+                if (open.bol && open.isPunct("#")) {
+                    // a directive line follows the uninvoked macro name: handle it now
+                    // (only reachable when open came from the raw stream; pending never
+                    // holds directive tokens)
+                    if (open.kind == Tok.Kind.PUNCT) { directive(open); return; }
+                }
+                pending.addFirst(open);
+            }
+            return;
+        }
+        List<List<Tok>> args = collectArgsStream();
+        // Prosser: substitution hideset = intersect(hs(name), hs(token after invocation)) ∪ {name}
+        Tok after = pull();
+        while (after != null && after.kind == Tok.Kind.NL) after = pull();
+        Set<String> afterHs = after == null || after.hs == null ? Set.of() : after.hs;
+        if (after != null) {
+            if (after.bol && after.isPunct("#")) {
+                // a directive line follows the invocation: process it, afterHs stays empty
+                pushBack(substitute(m, args, t, Set.of(), lastCloseParen != null ? lastCloseParen : t));
+                directive(after);
+                return;
+            }
+            pending.addFirst(after);
+        }
+        pushBack(substitute(m, args, t, afterHs, lastCloseParen != null ? lastCloseParen : t));
+    }
+
+    /** Collect macro args from pending/stream (calls may span lines; directives found at
+     *  BOL inside the argument list are processed, per tcc's unified token stream). */
+    private Tok lastCloseParen; // the ')' ending the most recent macro call
+
+    private List<List<Tok>> collectArgsStream() {
+        List<List<Tok>> args = new ArrayList<>();
+        List<Tok> cur = new ArrayList<>();
+        int depth = 1;
+        boolean sawAny = false;
+        for (;;) {
+            Tok t = pull();
+            if (t == null) fail("unterminated macro call");
+            if (lastPullFromStream && t.bol && t.isPunct("#")) { directive(t); continue; }
+            if (!active()) continue; // tokens in dead conditional regions are dropped
+            if (t.kind == Tok.Kind.NL) continue;
+            if (t.isPunct("(")) { depth++; cur.add(t); sawAny = true; }
+            else if (t.isPunct(")")) {
+                depth--;
+                if (depth == 0) { if (sawAny || !cur.isEmpty()) args.add(cur); lastCloseParen = t; break; }
+                cur.add(t);
+            } else if (t.isPunct(",") && depth == 1) { args.add(cur); cur = new ArrayList<>(); sawAny = true; }
+            else { cur.add(t); sawAny = true; }
+        }
+        return args;
     }
 
     /** We saw a non-directive token while skipping: consume through the next NL. */
@@ -221,23 +369,16 @@ public final class Preprocessor {
     }
 
     private boolean evalIf(List<Tok> exprToks) {
-        // defined handling first (before macro expansion)
-        List<Tok> toks = new ArrayList<>(exprToks.size());
-        for (int i = 0; i < exprToks.size(); i++) {
-            Tok t = exprToks.get(i);
-            if (t.isIdent("defined")) {
-                int j = i + 1;
-                boolean paren = j < exprToks.size() && exprToks.get(j).isPunct("(");
-                if (paren) j++;
-                String mname = j < exprToks.size() ? exprToks.get(j).text : "";
-                if (paren && j + 1 < exprToks.size() && exprToks.get(j + 1).isPunct(")")) j++;
-                toks.add(new Tok(Tok.Kind.PPNUM, macros.containsKey(mname) ? "1" : "0", t.line, t.file, t.ws, t.bol));
-                i = j;
-            } else {
-                toks.add(t);
-            }
+        // tcc semantics (tccpp.c:1440-1480): scan left-to-right, intercept `defined`
+        // (including when produced by macro substitution) without expanding its operand;
+        // expand everything else inline.
+        inPpExpr++;
+        List<Tok> expanded;
+        try {
+            expanded = expandAll(new ArrayList<>(exprToks));
+        } finally {
+            inPpExpr--;
         }
-        List<Tok> expanded = expandAll(toks);
         return Eval.eval(expanded);
     }
 
@@ -380,67 +521,27 @@ public final class Preprocessor {
     // ---------------------------------------------------------------- expansion
 
     /** Expand one token from the main stream; pulls further raw tokens for macro args. */
-    private void expandTop(Tok t) {
-        if (t.kind != Tok.Kind.IDENT) { out.add(t); return; }
-        switch (t.text) {
-            case "__FILE__":
-                out.add(t.withKindText(Tok.Kind.STRING, "\"" + t.file.replace("\\", "\\\\").replace("\"", "\\\"") + "\""));
-                return;
-            case "__LINE__":
-                out.add(t.withKindText(Tok.Kind.PPNUM, Integer.toString(t.line)));
-                return;
-            case "__BASE_FILE__":
-                out.add(t.withKindText(Tok.Kind.STRING, "\"" + baseFile.replace("\\", "\\\\").replace("\"", "\\\"") + "\""));
-                return;
-            case "__COUNTER__":
-                out.add(t.withKindText(Tok.Kind.PPNUM, Long.toString(ppCounter++)));
-                return;
-            case "__DATE__":
-                out.add(t.withKindText(Tok.Kind.STRING, "\"Jan  1 1970\""));
-                return;
-            case "__TIME__":
-                out.add(t.withKindText(Tok.Kind.STRING, "\"00:00:00\""));
-                return;
-            default:
-        }
-        Macro m = macros.get(t.text);
-        if (m == null || hidden(t, t.text)) { out.add(t); return; }
-        if (!m.functionLike) {
-            List<Tok> sub = applyHideset(m.body, t.text, t);
-            expandListInto(sub, out);
-            return;
-        }
-        // function-like: need '(' — peek raw stream (macro calls may span lines)
-        Tok open = nextNonNlRaw();
-        if (open == null || !open.isPunct("(") || hidden(open, t.text)) {
-            out.add(t);
-            if (open != null) expandTop(open);
-            return;
-        }
-        List<List<Tok>> args = collectArgs(open);
-        List<Tok> sub = substitute(m, args, t);
-        expandListInto(sub, out);
-    }
 
     private static boolean hidden(Tok t, String name) {
         return t.hs != null && t.hs.contains(name);
     }
 
-    private static List<Tok> applyHideset(List<Tok> body, String name) {
-        return applyHideset(body, name, null);
-    }
-
-    /** Copy body tokens adding `name` to hidesets; when callSite != null retarget file/line
-     *  to the invocation site (tcc evaluates __FILE__/__LINE__ at the expansion point). */
-    private static List<Tok> applyHideset(List<Tok> body, String name, Tok callSite) {
+    /** Copy body tokens adding `name` to hidesets; the base hideset is `base` when given
+     *  (function-like substitution: intersect rule), else the call-site token's own hideset
+     *  (object-like). When callSite != null retarget file/line to the invocation site
+     *  (tcc evaluates __FILE__/__LINE__ at the expansion point). */
+    private static List<Tok> applyHideset(List<Tok> body, String name, Tok callSite, Set<String> base) {
+        if (base == null) base = callSite != null && callSite.hs != null ? callSite.hs : Set.of();
         List<Tok> sub = new ArrayList<>(body.size());
         for (Tok b : body) {
             Tok c = new Tok(b.kind, b.text,
                     callSite != null ? callSite.line : b.line,
                     callSite != null ? callSite.file : b.file,
                     b.ws, b.bol);
-            if (b.hs == null) c.hs = Set.of(name);
-            else { Set<String> s = new HashSet<>(b.hs); s.add(name); c.hs = Set.copyOf(s); }
+            Set<String> s = new HashSet<>(base);
+            if (b.hs != null) s.addAll(b.hs);
+            s.add(name);
+            c.hs = Set.copyOf(s);
             sub.add(c);
         }
         return sub;
@@ -453,57 +554,81 @@ public final class Preprocessor {
         return result;
     }
 
+    private int inPpExpr; // >0 while expanding a #if line (defined interception active)
+
     /** Core expansion loop over a worklist; appends expanded tokens to result. */
     private void expandListInto(List<Tok> work, List<Tok> result) {
         int i = 0;
         while (i < work.size()) {
             Tok t = work.get(i);
-            if (t.kind == Tok.Kind.IDENT) {
+            if (inPpExpr > 0 && t.isIdent("defined")) {
+                // intercept defined X / defined(X) without expanding the operand
+                int j = i + 1;
+                boolean paren = j < work.size() && work.get(j).isPunct("(");
+                if (paren) j++;
+                String mname = j < work.size() ? work.get(j).text : "";
+                if (paren && j + 1 < work.size() && work.get(j + 1).isPunct(")")) j++;
+                Tok num = new Tok(Tok.Kind.PPNUM, macros.containsKey(mname) ? "1" : "0", t.line, t.file, t.ws, t.bol);
+                for (int k = j; k >= i; k--) work.remove(k);
+                work.add(i, num);
+                continue; // rescan (the PPNUM falls through to result)
+            }
+            if (t.kind != Tok.Kind.IDENT) { result.add(t); i++; continue; }
+            Macro m = macros.get(t.text);
+            if (m == null) {
+                // builtins apply only when not shadowed by a user macro (tcc: #define __LINE__ wins)
+                boolean done = true;
                 switch (t.text) {
                     case "__FILE__":
-                        t = t.withKindText(Tok.Kind.STRING, "\"" + t.file.replace("\\", "\\\\").replace("\"", "\\\"") + "\"");
-                        result.add(t); i++; continue;
+                        result.add(t.withKindText(Tok.Kind.STRING, "\"" + t.file.replace("\\", "\\\\").replace("\"", "\\\"") + "\""));
+                        break;
                     case "__LINE__":
-                        t = t.withKindText(Tok.Kind.PPNUM, Integer.toString(t.line));
-                        result.add(t); i++; continue;
+                        result.add(t.withKindText(Tok.Kind.PPNUM, Integer.toString(t.line)));
+                        break;
                     case "__BASE_FILE__":
-                        t = t.withKindText(Tok.Kind.STRING, "\"" + baseFile.replace("\\", "\\\\").replace("\"", "\\\"") + "\"");
-                        result.add(t); i++; continue;
+                        result.add(t.withKindText(Tok.Kind.STRING, "\"" + baseFile.replace("\\", "\\\\").replace("\"", "\\\"") + "\""));
+                        break;
                     case "__COUNTER__":
-                        t = t.withKindText(Tok.Kind.PPNUM, Long.toString(ppCounter++));
-                        result.add(t); i++; continue;
+                        result.add(t.withKindText(Tok.Kind.PPNUM, Long.toString(ppCounter++)));
+                        break;
                     case "__DATE__":
-                        t = t.withKindText(Tok.Kind.STRING, "\"Jan  1 1970\"");
-                        result.add(t); i++; continue;
+                        result.add(t.withKindText(Tok.Kind.STRING, "\"Jan  1 1970\""));
+                        break;
                     case "__TIME__":
-                        t = t.withKindText(Tok.Kind.STRING, "\"00:00:00\"");
-                        result.add(t); i++; continue;
+                        result.add(t.withKindText(Tok.Kind.STRING, "\"00:00:00\""));
+                        break;
                     case "_Pragma":
                         // consume _Pragma("...") as no-op (we ignore pragmas)
                         if (i + 3 < work.size() && work.get(i + 1).isPunct("(") && work.get(i + 3).isPunct(")")) {
-                            i += 4; continue;
+                            i += 3; // past ')'; loop's i++ moves beyond
+                            break;
                         }
-                        result.add(t); i++; continue;
+                        result.add(t);
+                        break;
                     default:
+                        done = false;
+                        break;
                 }
-                Macro m = macros.get(t.text);
-                if (m != null && !hidden(t, t.text)) {
-                    if (!m.functionLike) {
-                        List<Tok> sub = applyHideset(m.body, t.text, t);
-                        work.remove(i);
-                        work.addAll(i, sub);
-                        continue; // rescan
-                    }
-                    // find '(' within work list
-                    int j = i + 1;
-                    if (j < work.size() && work.get(j).isPunct("(") && !hidden(work.get(j), t.text)) {
-                        List<List<Tok>> args = new ArrayList<>();
-                        int end = parseArgsInList(work, j, args);
-                        List<Tok> sub = substitute(m, args, t);
-                        for (int k = end; k >= i; k--) work.remove(k);
-                        work.addAll(i, sub);
-                        continue; // rescan
-                    }
+                if (done) { i++; continue; }
+                result.add(t); i++; continue;
+            }
+            if (!hidden(t, t.text)) {
+                if (!m.functionLike) {
+                    List<Tok> sub = pasteTokens(applyHideset(m.body, t.text, t, null), null, false);
+                    work.remove(i);
+                    work.addAll(i, sub);
+                    continue; // rescan
+                }
+                int j = i + 1;
+                if (j < work.size() && work.get(j).isPunct("(") && !hidden(work.get(j), t.text)) {
+                    List<List<Tok>> args = new ArrayList<>();
+                    int end = parseArgsInList(work, j, args);
+                    java.util.Set<String> afterHs = end + 1 < work.size() && work.get(end + 1).hs != null
+                            ? work.get(end + 1).hs : java.util.Set.of();
+                    List<Tok> sub = substitute(m, args, t, afterHs, work.get(end));
+                    for (int k = end; k >= i; k--) work.remove(k);
+                    work.addAll(i, sub);
+                    continue; // rescan
                 }
             }
             result.add(t);
@@ -534,39 +659,19 @@ public final class Preprocessor {
         throw new PpError("unterminated macro call");
     }
 
-    /** Collect args from the raw file stream (macro call in main line, may span lines). */
-    private List<List<Tok>> collectArgs(Tok open) {
-        List<List<Tok>> args = new ArrayList<>();
-        List<Tok> cur = new ArrayList<>();
-        int depth = 1;
-        boolean sawAny = false;
-        for (;;) {
-            Tok t = nextRaw();
-            if (t == null) fail("unterminated macro call");
-            if (t.kind == Tok.Kind.NL) continue;
-            if (t.isPunct("(")) { depth++; cur.add(t); sawAny = true; }
-            else if (t.isPunct(")")) {
-                depth--;
-                if (depth == 0) { if (sawAny || !cur.isEmpty()) args.add(cur); break; }
-                cur.add(t);
-            } else if (t.isPunct(",") && depth == 1) { args.add(cur); cur = new ArrayList<>(); sawAny = true; }
-            else { cur.add(t); sawAny = true; }
-        }
-        return args;
-    }
 
-    private Tok nextNonNlRaw() {
-        Tok t = nextRaw();
-        // NOTE: we cannot push back; the caller handles the non-'(' case via expandTop recursion.
-        while (t != null && t.kind == Tok.Kind.NL) t = nextRaw();
-        return t;
-    }
 
-    private static final String PM = " PM"; // placemarker sentinel for empty macro args
+    private static final String PM = "\u0000PM"; // placemarker sentinel for empty macro args
 
     /** Macro body substitution with # stringize, ## paste, GNU ,##__VA_ARGS__. */
-    private List<Tok> substitute(Macro m, List<List<Tok>> args, Tok callSite) {
+    private List<Tok> substitute(Macro m, List<List<Tok>> args, Tok callSite, java.util.Set<String> afterHs, Tok posTarget) {
         String name = callSite.text;
+        // Prosser: function-like substitution hideset = intersect(hs(name), hs(after)) ∪ {name}
+        java.util.Set<String> callHs = callSite.hs == null ? java.util.Set.of() : callSite.hs;
+        java.util.Set<String> base0 = new HashSet<>(callHs);
+        base0.retainAll(afterHs);
+        base0.add(name);
+        final java.util.Set<String> base = java.util.Set.copyOf(base0);
         // map params to args
         Map<String, List<Tok>> amap = new HashMap<>();
         int fixed = m.params.size() + (m.variadic ? -1 : 0);
@@ -607,20 +712,36 @@ public final class Preprocessor {
             Tok b = body.get(k);
             if (b.isPunct("#") && k + 1 < body.size() && body.get(k + 1).kind == Tok.Kind.IDENT
                     && amap.containsKey(body.get(k + 1).text)) {
-                res.add(new Tok(Tok.Kind.STRING, "\"" + stringize(amap.get(body.get(k + 1).text)) + "\"",
-                        b.line, b.file, b.ws, b.bol));
+                Tok st = new Tok(Tok.Kind.STRING, "\"" + stringize(amap.get(body.get(k + 1).text)) + "\"",
+                        posTarget.line, posTarget.file, b.ws, b.bol);
+                st.hs = base;
+                res.add(st);
                 k++;
                 continue;
             }
             if (b.kind == Tok.Kind.IDENT && amap.containsKey(b.text)) {
                 List<Tok> arg = expanded.get(b.text);
                 if (arg.isEmpty()) res.add(new Tok(Tok.Kind.PUNCT, PM, b.line, b.file, b.ws, b.bol));
-                else res.addAll(arg);
+                else for (Tok a : arg) {
+                    // args keep their own hideset but adopt the replay position
+                    // (tcc macro replay does not advance the line number)
+                    Tok at = new Tok(a.kind, a.text, posTarget.line, posTarget.file, a.ws, a.bol);
+                    at.hs = a.hs;
+                    res.add(at);
+                }
                 continue;
             }
-            res.add(b);
+            // body token: retarget to the replay position and apply the substitution hideset
+            Tok bt = new Tok(b.kind, b.text, posTarget.line, posTarget.file, b.ws, b.bol);
+            bt.hs = base;
+            res.add(bt);
         }
-        // paste pass over placemarkers
+        return pasteTokens(res, base, m.variadic);
+    }
+
+    /** ## token pasting over a substituted body (placemarker-aware). tcc also pastes
+     *  inside object-like macro bodies (e.g. `#define __LINE__ # ## #`). */
+    private List<Tok> pasteTokens(List<Tok> res, java.util.Set<String> base, boolean variadicMacro) {
         List<Tok> pasted = new ArrayList<>();
         for (int k = 0; k < res.size(); k++) {
             Tok t = res.get(k);
@@ -631,7 +752,7 @@ public final class Preprocessor {
                 boolean rightPm = nx.isPunct(PM);
                 // GNU: , ## __VA_ARGS__ with empty varargs drops the comma
                 if (rightPm && nx.text.equals(PM) && left != null && left.isPunct(",")
-                        && k + 1 < res.size() && isEmptyVariadicAdjacent(body, nx, variadicName)) {
+                        && variadicMacro) {
                     pasted.remove(pasted.size() - 1);
                     k++;
                     continue;
@@ -642,6 +763,7 @@ public final class Preprocessor {
                 if (left == null) { k++; continue; } // leading ## (GNU): drop
                 pasted.remove(pasted.size() - 1);
                 List<Tok> fused = relex(left.text + nx.text, left);
+                for (Tok ft : fused) ft.hs = base;
                 pasted.addAll(fused);
                 k++;
                 continue;
@@ -650,12 +772,7 @@ public final class Preprocessor {
         }
         List<Tok> noPm = new ArrayList<>(pasted.size());
         for (Tok t : pasted) if (!t.isPunct(PM)) noPm.add(t);
-        return applyHideset(noPm, name, callSite);
-    }
-
-    /** True when the ## right-operand placemarker came from the (empty) variadic parameter. */
-    private static boolean isEmptyVariadicAdjacent(List<Tok> body, Tok pmTok, String variadicName) {
-        return variadicName != null; // placemarker on RHS of ## + variadic macro: tcc/GNU drop the comma
+        return noPm;
     }
 
     private static Tok punct(String s, List<Tok> like) {
