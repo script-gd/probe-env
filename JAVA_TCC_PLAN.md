@@ -53,7 +53,7 @@
 - **估**：5-6k 行 Java。
 - **风险**：`decl()`/`unary()`/`gexpr()` 的交织递归、初始化器的 `decl_designator` 状态机、VLA 的 token 回放（`begin_macro`/`end_macro` 已在预处理器有等价物可复用）。
 
-**M2 当前状态（2026-10-18）**：解析器骨架已落地（`jtcc.cc.Parser`/`CType`/`Sym`/`ConstEval` + `jtcc.ctok.CTokenizer`，忠实对应 tccgen.c 的 `decl`/`type_decl`/`post_type`/`block`/表达式优先级链结构）。**tests2 范围内 122/122 全部解析接受、fixture 5/5 全部解析通过**（CI 门控：`scripts/check-parse-accept.sh`）。剩余 M2 深度工作：诊断消息逐字对齐（60/96 用例的告警文本）、`_Static_assert` 在 M2 降级为警告（因无类型布局，M3 恢复严格）、初始化器的语义化解析（当前为跳过式）、结构体字段表构建。
+**M2 当前状态（2026-10-18，二次深化后）**：解析器骨架已落地（`jtcc.cc.Parser`/`CType`/`Sym`/`ConstEval` + `jtcc.ctok.CTokenizer`，忠实对应 tccgen.c 的 `decl`/`type_decl`/`post_type`/`block`/表达式优先级链结构）。**tests2 范围内 122/122 全部解析接受、fixture 5/5 全部解析通过**（CI 门控：`scripts/check-parse-accept.sh`）。二次深化完成：完整 struct/union 布局（`struct_layout` 移植：字段偏移/对齐/匿名成员/位域解析）、`offsetof` 求值（含匿名成员递归）、`sizeof` 求值（类型名与 `((T*)0)->member` 成员模式）、块作用域 struct 标签（C 作用域遮蔽/恢复）、LP64 `long` 归一、链式 typedef 解析——**fixture 的全部 `GDCC_GODOT_ASSERT_SIZE/ASSERT_LAYOUT` 静态断言在 M2 即可真值求值（警告归零）**。剩余 M2 深度工作：诊断消息逐字对齐（60/96 用例的告警文本）、初始化器的语义化解析（当前为跳过式，M3 接入）、位域布局。
 
 ### M3 — x86_64 代码生成
 
