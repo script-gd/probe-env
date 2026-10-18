@@ -48,6 +48,14 @@ public final class ElfObj {
         return symbols.size() - 1;
     }
 
+    /** true when the symbol is local (static) — safe for direct RIP-relative PC32 access in PIC.
+     *  Global/undefined symbols are potentially preemptible and need GOT-relative access. */
+    public boolean symbolIsLocal(int id) {
+        if (id <= 0 || id >= symbols.size()) return false;
+        SymDef sd = symbols.get(id);
+        return (sd.info >> 4) == STB_LOCAL && sd.shndx != SHN_UNDEF;
+    }
+
     public int sectionIndex(Section s) { return sections.indexOf(s); }
 
     public void write(Path out) throws IOException {

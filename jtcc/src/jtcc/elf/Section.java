@@ -63,7 +63,9 @@ public final class Section {
         int n = data.length * 2;
         while (n < cap) n *= 2;
         byte[] d = new byte[n];
-        System.arraycopy(data, 0, d, 0, size);
+        // copy only what the old buffer actually holds: `size` may exceed data.length when
+        // the prologue reserves bytes by bumping size directly (backpatched later)
+        System.arraycopy(data, 0, d, 0, Math.min(size, data.length));
         data = d;
     }
 

@@ -61,4 +61,14 @@ public final class GenState {
         sd.value = value;
         return obj.addSymbol(sd);
     }
+
+    /** tentative definition (uninitialized non-static global): a COMMON symbol so duplicate
+     *  definitions across TUs are merged by the linker (tcc -fcommon-style behavior). */
+    public int addCommonSymbol(String name, long size, long align) {
+        ElfObj.SymDef sd = new ElfObj.SymDef(name, ElfObj.STB_GLOBAL << 4 | ElfObj.STT_OBJECT);
+        sd.shndx = ElfObj.SHN_COMMON;
+        sd.value = align;   // st_value holds the alignment for COMMON
+        sd.size = size;
+        return obj.addSymbol(sd);
+    }
 }

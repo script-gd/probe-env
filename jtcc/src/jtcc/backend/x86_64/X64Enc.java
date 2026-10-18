@@ -117,8 +117,16 @@ public final class X64Enc {
         st.le32(0);
     }
 
-    public void push(int r) { if (r >= 8) st.g(0x41); st.g(0x50 + (r & 7)); }
-    public void pop(int r) { if (r >= 8) st.g(0x41); st.g(0x58 + (r & 7)); }
+    /** mov r, [rip + sym@GOTPCREL]: load the symbol's 64-bit address from the GOT (PIC). */
+    public void movGotPcRel(int dst, int symIndex) {
+        rex(true, dst, 0, 0);
+        st.g(0x8b);
+        st.g((0 << 6) | ((dst & 7) << 3) | 5); // [rip+disp32]
+        st.reloca(st.text, symIndex, st.text.size, GenState_R.R_X86_64_GOTPCREL, -4);
+        st.le32(0);
+    }
+
+    public void push(int r) { if (r >= 8) st.g(0x41); st.g(0x50 + (r & 7)); }    public void pop(int r) { if (r >= 8) st.g(0x41); st.g(0x58 + (r & 7)); }
 
     /** binop r/m64, r64 (op opcode: add=1 or=3 adc=2 sbb=3? see table). */
     public void binopRM(int opcode, int src, int dst) {
@@ -173,7 +181,9 @@ public final class X64Enc {
 
     public void callRel32(int symIndex) {
         st.g(0xe8);
-        st.reloca(st.text, symIndex, st.text.size, GenState_R.R_X86_64_PC32, -4);
+        // PLT32 so the linker can route calls to undefined (extern) symbols through the PLT
+        // when producing a shared object; resolves directly for locally-defined symbols.
+        st.reloca(st.text, symIndex, st.text.size, GenState_R.R_X86_64_PLT32, -4);
         st.le32(0);
     }
 
@@ -233,5 +243,7 @@ public final class X64Enc {
     // holder for reloc constants to avoid circular import in this file
     static final class GenState_R {
         static final int R_X86_64_PC32 = 2;
+        static final int R_X86_64_PLT32 = 4;
+        static final int R_X86_64_GOTPCREL = 9;
     }
 }

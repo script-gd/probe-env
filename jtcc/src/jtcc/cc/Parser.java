@@ -29,6 +29,7 @@ public final class Parser {
     public jtcc.backend.x86_64.VGen gen;
     /** string literal counter for rodata labels. */
     private int strLitCount;
+    private String curFuncName = ""; // current function name for __func__
 
     private final Deque<Map<String, Sym>> globalStack = new ArrayDeque<>();
     private final Deque<Map<String, Sym>> localStack = new ArrayDeque<>();
@@ -52,7 +53,7 @@ public final class Parser {
 
     // ------------------------------------------------------- token access
     private CTok tok() { return toks.get(pos); }
-    private CTok next() { CTok t = toks.get(pos++); if (gen != null) gen.dbgLine = t.line; return t; }
+    private CTok next() { CTok t = toks.get(pos++); if (gen != null) { gen.dbgLine = t.line; gen.dbgFile = t.file; } return t; }
     private boolean accept(String s) { if (tok().is(s)) { pos++; return true; } return false; }
     private void expect(String s) {
         if (!accept(s)) error("expected '" + s + "' got '" + tok().text + "'");
@@ -718,6 +719,7 @@ public final class Parser {
     }
 
     private void parseFunction(Sym fn) {
+        curFuncName = fn.name;
         // new scope for params+body
         localStack.push(new HashMap<>());
         if (gen != null) {
@@ -764,7 +766,80 @@ public final class Parser {
         }
     }
 
+    /** compound literal `(T){ ... }`: allocate T on the stack, evaluate scalar field
+     *  initializers (designated `.f = e` or positional), push the object lvalue. */
+    private void genCompoundLiteral(CType ct) {
+        if (gen == null) { skipInitializer(); return; }
+        int size = Math.max(1, sizeOfType(ct));
+        gen.loc = (gen.loc - size) & -Math.max(1, alignOf(ct));
+        int base = gen.loc;
+        expect("{");
+        Sym posField = (ct.btype() == CType.VT_STRUCT && ct.ref != null) ? ct.ref.next : null;
+        while (!tok().is("}")) {
+            Sym f = null;
+            if (accept(".")) {
+                String fname = tok().text; next();
+                f = fieldSym(ct, fname);
+                expect("=");
+            } else {
+                f = posField;
+                if (posField != null) posField = posField.next;
+            }
+            if (tok().is("{")) { skipInitializer(); }
+            else {
+                exprEq();
+                if (f != null) {
+                    int r = gen.gv();
+                    SValue dst = new SValue(f.type);
+                    dst.r = Sym.VT_LOCAL | Sym.VT_LVAL;
+                    dst.c = base + f.c;
+                    gen.store(r, dst);
+                }
+                if (gen.vtop > 0) gen.vpop();
+            }
+            if (!accept(",")) break;
+        }
+        expect("}");
+        SValue v = gen.vpush();
+        v.type = ct;
+        v.r = Sym.VT_LOCAL | Sym.VT_LVAL;
+        v.c = base;
+    }
+
     // ------------------------------------------------------- statements (tccgen.c block())
+
+    /** statement-expression body `({ ... })`: parse statements; the value of a trailing
+     *  expression-statement becomes the result (tcc: the last expr is the block value). */
+    private void blockStmtExpr() {
+        while (!tok().is("}")) {
+            if (tok().kind == CTok.Kind.EOF) { error("unexpected EOF in statement expression"); return; }
+            if (isLastExprStmt()) {
+                expr();      // keep this value on the stack as the statement-expression result
+                expect(";");
+                return;
+            }
+            statement();
+        }
+        if (gen != null) gen.vpushConst(new CType(CType.VT_INT, null), 0); // void result
+    }
+
+    /** true when the upcoming tokens are a single expression-statement immediately before the
+     *  closing brace: `<expr> ; }` — the expression is not a declaration, and its terminating
+     *  `;` at block depth 0 is followed directly by `}`. */
+    private boolean isLastExprStmt() {
+        CTok t0 = tok();
+        if (t0.kind == CTok.Kind.KEYWORD) return false; // decl / control-flow keyword
+        if (t0.kind == CTok.Kind.IDENT && typedefs.get(t0.text) != null) return false; // typedef decl
+        int depth = 0;
+        for (int i = pos; i < toks.size(); i++) {
+            CTok t = toks.get(i);
+            if (t.is("(") || t.is("[")) depth++;
+            else if (t.is(")") || t.is("]")) depth--;
+            else if (t.is("{") || t.is("}")) return false; // compound/block: not a simple trailing expression
+            else if (t.is(";") && depth == 0) return toks.get(i + 1).is("}");
+        }
+        return false;
+    }
 
     private void block(int flags) {
         blockDepth++;
@@ -847,7 +922,7 @@ public final class Parser {
             case "for": {
                 next(); expect("(");
                 if (!accept(";")) {
-                    if (!decl(0)) { expr(); if (gen != null) while (gen.vtop > 0) gen.vpop(); expect(";"); }
+                     if (!decl(0)) { int b = gen != null ? gen.vtop : 0; expr(); if (gen != null) while (gen.vtop > b) gen.vpop(); expect(";"); }
                     // decl() consumed its own ';'
                 }
                 if (gen != null) {
@@ -857,7 +932,7 @@ public final class Parser {
                     int jz = gen.gjmpIfZero();
                     int bodyAt = gen.enc.jmpRel32();
                     int incrAt = gen.label();
-                    if (!tok().is(")")) { expr(); if (gen != null) while (gen.vtop > 0) gen.vpop(); }
+                     if (!tok().is(")")) { int b = gen != null ? gen.vtop : 0; expr(); if (gen != null) while (gen.vtop > b) gen.vpop(); }
                     int back = gen.enc.jmpRel32();
                     gen.enc.patchRel32(back, begin);
                     expect(")");
@@ -879,7 +954,9 @@ public final class Parser {
                 return;
             }
             case "switch": {
-                next(); expect("("); expr(); expect(")");
+                next();
+                int swBase = gen != null ? gen.vtop : 0;
+                expect("("); expr(); expect(")");
                 if (gen != null) {
                     int switchReg = gen.gv();
                     int dispatch = gen.enc.jmpRel32();
@@ -906,6 +983,7 @@ public final class Parser {
                     gen.enc.patchRel32(end, gen.label());
                     popLoop();
                     patchBreaks();
+                    while (gen.vtop > swBase) gen.vpop(); // release the switch controlling value's register
                 } else {
                     statement();
                 }
@@ -961,10 +1039,11 @@ public final class Parser {
                     return;
                 }
                 if (decl(0)) return;
+                int base = gen != null ? gen.vtop : 0;
                 expr();
-                if (gen != null) while (gen.vtop > 0) gen.vpop();
+                if (gen != null) while (gen.vtop > base) gen.vpop(); // pop to entry baseline, not 0
                 expect(";");
-                if (gen != null && System.getenv("JTCC_DBG_REGS") != null) gen.dumpUsed("stmt-end");
+                if (gen != null && System.getenv("JTCC_DBG_REGS") != null) gen.dumpUsed("stmt@" + gen.dbgLine);
         }
     }
 
@@ -974,14 +1053,18 @@ public final class Parser {
     private void genDefineGlobal(Sym sym, CType declType, boolean isExtern, boolean hasInit) {
         if (isExtern) return;
         int sz = Math.max(1, jtcc.backend.x86_64.VGen.typeSize(sym.type));
+        boolean global = (sym.type.t & CType.VT_STATIC) == 0;
         if (hasInit) {
             int off = gen.st.data.size;
-            sym.symId = gen.st.addDataSymbol(sym.name, gen.st.data, off, true);
+            sym.symId = gen.st.addDataSymbol(sym.name, gen.st.data, off, global);
             gen.st.data.add(new byte[sz]);
             dataInitOff.put(sym.name, off);
+        } else if (global) {
+            // tentative definition: COMMON symbol, merged across TUs by the linker
+            sym.symId = gen.st.addCommonSymbol(sym.name, sz, Math.max(1, alignOf(sym.type)));
         } else {
             int off = gen.st.bss.size;
-            sym.symId = gen.st.addDataSymbol(sym.name, gen.st.bss, off, true);
+            sym.symId = gen.st.addDataSymbol(sym.name, gen.st.bss, off, false);
             gen.st.bss.size += sz;
         }
     }
@@ -1114,17 +1197,29 @@ public final class Parser {
                 dup.type = lv.type; dup.r = lv.r; dup.c = lv.c; dup.symId = lv.symId;
                 int r = gen.gv();
                 exprEq();
-                gen.genOpi(op.substring(0, 1));
+                gen.genOpi(op.substring(0, op.length() - 1)); // strip trailing '=' (>>= -> >>)
                 genStoreBack(lv);
                 return;
             }
             exprEq();
-            if (gen != null) genStoreBack(null);
+            if (gen != null) {
+                SValue rv = gen.vtop();
+                SValue lv = gen.vstack[gen.vtop - 2];
+                if (lv.type != null && lv.type.btype() == CType.VT_STRUCT
+                        && rv.type != null && rv.type.btype() == CType.VT_STRUCT) {
+                    // struct-by-value assignment: copy the whole object
+                    gen.genStructCopy(lv, rv, sizeOfType(lv.type));
+                    gen.vpop(); // pop rhs; leave the lhs lvalue as the expression result
+                } else {
+                    genStoreBack(null);
+                }
+            }
         }
     }
 
     /** store the rvalue on top into the lvalue below it, leaving the rvalue on top. */
     private void genStoreBack(SValue compoundLv) {
+        if (compoundLv == null && gen.vtop < 2) throw new IllegalStateException("store underflow @" + gen.dbgFile + ":" + gen.dbgLine + " vtop=" + gen.vtop);
         SValue rv = gen.vtop();
         SValue lv = compoundLv != null ? compoundLv : gen.vstack[gen.vtop - 2];
         int r = gen.gv();
@@ -1371,7 +1466,7 @@ public final class Parser {
                     // cast or parenthesized or statement-expression
                     if (toks.get(pos + 1).is("{")) {
                         next(); next(); // '({' statement expression
-                        while (!tok().is("}")) statement();
+                        blockStmtExpr();
                         expect("}"); expect(")");
                         postfixLoop();
                         return;
@@ -1381,7 +1476,7 @@ public final class Parser {
                     if (parseBtype(ct, null, false)) {
                         typeDecl(ct, new StringBuilder(), TYPE_DIRECT | TYPE_ABSTRACT);
                         expect(")");
-                        if (tok().is("{")) { skipInitializer(); postfixLoop(); return; } // compound literal
+                        if (tok().is("{")) { genCompoundLiteral(ct); postfixLoop(); return; } // compound literal
                         unary(); // cast operand
                         postfixLoop();
                         return;
@@ -1541,7 +1636,10 @@ public final class Parser {
                 next();
                 return;
             case CFLOAT: case CDOUBLE: case CLDOUBLE:
-                next(); // float constants: later pass (M3 integer scope)
+                // M3 is integer-scoped: push a placeholder so the value stack stays balanced.
+                // Float SSE codegen is a known gap (tracked in JAVA_TCC_PLAN M3 risks).
+                if (gen != null) gen.vpushConst(new CType(CType.VT_DOUBLE, null), 0);
+                next();
                 return;
             case STR: case LSTR:
                 if (gen != null) pushStringLiteral(t);
@@ -1553,7 +1651,8 @@ public final class Parser {
                 return;
             case KEYWORD:
                 if (t.text.equals("__func__") || t.text.equals("__FUNCTION__") || t.text.equals("__PRETTY_FUNCTION__")) {
-                    next(); // predefined function-name identifier (string constant semantics)
+                    if (gen != null) pushCStringLiteral(curFuncName);
+                    next();
                     return;
                 }
                 break;
@@ -1592,6 +1691,7 @@ public final class Parser {
 
     /** push an identifier reference (local, global, or extern function symbol). */
     private void pushIdent(String name) {
+        if (System.getenv("JTCC_DBG_ID") != null) System.err.println("DBG pushIdent " + name + " @" + (pos>0?toks.get(pos-1).file+":"+toks.get(pos-1).line:"?") + " vtop(before)=" + (gen!=null?gen.vtop:-9));
         // enum constants are compile-time integers, not symbols
         Long enumVal = enumConsts.get(name);
         if (enumVal != null) {
@@ -1634,6 +1734,20 @@ public final class Parser {
         int off = gen.st.rodata.size;
         byte[] bytes = t.str != null ? t.str : new byte[]{0};
         gen.st.rodata.add(bytes);
+        pushRoDataString(label, off);
+    }
+
+    /** push a C string literal built from a Java string (for __func__ etc.). */
+    private void pushCStringLiteral(String s) {
+        String label = ".LC" + (strLitCount++);
+        int off = gen.st.rodata.size;
+        byte[] bytes = new byte[s.length() + 1];
+        for (int i = 0; i < s.length(); i++) bytes[i] = (byte) s.charAt(i);
+        gen.st.rodata.add(bytes);
+        pushRoDataString(label, off);
+    }
+
+    private void pushRoDataString(String label, int off) {
         int id = gen.st.addDataSymbol(label, gen.st.rodata, off, false);
         SValue v = gen.vpush();
         CType ct = new CType(CType.VT_PTR, null);

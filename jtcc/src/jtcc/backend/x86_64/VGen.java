@@ -26,6 +26,7 @@ public final class VGen {
     // frame state
     public int loc;                 // frame offset (tcc loc, negative)
     public int dbgLine;             // current source line (parser-fed, for diagnostics)
+    public String dbgFile = "?";    // current source file (parser-fed, for diagnostics)
     public int funcSubSpOffset;     // backpatch offset for sub rsp
     private static final int FUNC_PROLOG_SIZE = 11; // push rbp(1) + mov rbp,rsp(3) + sub rsp,imm32(3+4)
 
@@ -145,7 +146,13 @@ public final class VGen {
         if ((sv.r & Sym.VT_LVAL) != 0) {
             // lvalue: load the pointed value (global symbol, local, or base register)
             if ((sv.r & Sym.VT_SYM) != 0) {
-                enc.movLoadRipSym(sz, r, sv.symId, (int) sv.c);
+                if (st.obj.symbolIsLocal(sv.symId)) {
+                    enc.movLoadRipSym(sz, r, sv.symId, (int) sv.c);
+                } else {
+                    // PIC: global/extern symbol — load its address from the GOT, then dereference
+                    enc.movGotPcRel(r, sv.symId);
+                    enc.movLoad(sz, r, r, (int) sv.c, sv.type.isUnsigned());
+                }
             } else if ((sv.r & 0x00ff) == Sym.VT_LOCAL) {
                 enc.movLoad(sz, r, X64Enc.R_RBP, (int) sv.c, sv.type.isUnsigned());
             } else if ((sv.r & 0x00ff) < Sym.VT_CONST) {
@@ -157,7 +164,8 @@ public final class VGen {
         if ((sv.r & 0x00ff) == Sym.VT_CONST) {
             if ((sv.r & Sym.VT_SYM) != 0) {
                 // symbol address
-                enc.leaRipSym(r, sv.symId);
+                if (st.obj.symbolIsLocal(sv.symId)) enc.leaRipSym(r, sv.symId);
+                else enc.movGotPcRel(r, sv.symId); // PIC: GOT entry holds the address
                 if (sv.c != 0) {
                     enc.rex(true, 0, 0, r);
                     st.g(0x81); enc.modrmRR(0, r); st.le32((int) sv.c); // add r, imm32
@@ -180,12 +188,21 @@ public final class VGen {
         if ((sv.r & 0x00ff) == Sym.VT_LOCAL) {
             enc.movStore(sz, r, X64Enc.R_RBP, (int) sv.c);
         } else if ((sv.r & Sym.VT_SYM) != 0 && (sv.r & Sym.VT_LVAL) != 0) {
-            // store to global: mov [rip+sym+off], r
-            enc.rex(sz == 8, r, 0, 0);
-            st.g(0x89);
-            st.g((0 << 6) | ((r & 7) << 3) | 5);
-            st.reloca(st.text, sv.symId, st.text.size, jtcc.elf.ElfObj.R_X86_64_PC32, sv.c - 4);
-            st.le32(0);
+            // store to global
+            if (st.obj.symbolIsLocal(sv.symId)) {
+                // mov [rip+sym+off], r
+                enc.rex(sz == 8, r, 0, 0);
+                st.g(0x89);
+                st.g((0 << 6) | ((r & 7) << 3) | 5);
+                st.reloca(st.text, sv.symId, st.text.size, jtcc.elf.ElfObj.R_X86_64_PC32, sv.c - 4);
+                st.le32(0);
+            } else {
+                // PIC: load the symbol address from the GOT into a temp, then store through it
+                int tmp = allocTemp();
+                enc.movGotPcRel(tmp, sv.symId);
+                enc.movStore(sz, r, tmp, (int) sv.c);
+                freeReg(tmp);
+            }
         } else if ((sv.r & Sym.VT_LVAL) != 0 && (sv.r & 0x00ff) < Sym.VT_CONST) {
             int base = sv.r & 0x00ff;
             enc.movStore(sz, r, base, (int) sv.c);
@@ -217,6 +234,7 @@ public final class VGen {
 
     public void gfuncProlog(Sym fn) {
         loc = 0;
+        java.util.Arrays.fill(used, false); // no register is live at function entry
         st.ind = st.text.size;
         funcSymId = st.addFuncSymbol(fn.name, (fn.type.t & CType.VT_STATIC) == 0);
         fn.symId = funcSymId;
@@ -420,6 +438,7 @@ public final class VGen {
 
     /** setcc-based comparison to a value (for ==,!=,<,<=,>,>= used as rvalue). */
     public void genCmpSet(String op) {
+        if (vtop < 2) throw new IllegalStateException("cmp underflow @" + dbgLine + " op=" + op + " vtop=" + vtop);
         if (vstack[vtop - 2].isConst() && vstack[vtop - 1].isConst()) {
             SValue b = vstack[--vtop], a = vstack[vtop - 1];
             a.c = cmpFold(op, a.c, b.c, a.type.isUnsigned());
@@ -535,16 +554,38 @@ public final class VGen {
         } else if ((lv.r & Sym.VT_SYM) != 0) {
             // global: symbol address (+ addend)
             int r = allocTemp();
-            enc.leaRipSym(r, lv.symId);
+            if (st.obj.symbolIsLocal(lv.symId)) enc.leaRipSym(r, lv.symId);
+            else enc.movGotPcRel(r, lv.symId); // PIC
             if (lv.c != 0) {
                 enc.rex(true, 0, 0, r);
                 st.g(0x81); enc.modrmRR(0, r); st.le32((int) lv.c);
             }
             lv.r = r;
         }
-        lv.r &= ~Sym.VT_LVAL;
-        // type: pointer to lv.type — caller sets it
+         lv.r &= ~Sym.VT_LVAL;
+         // type: pointer to lv.type — caller sets it
     }
+
+    /** struct assignment: copy `size` bytes from the src lvalue to the dst lvalue. */
+    public void genStructCopy(SValue dst, SValue src, int size) {
+        genAddrOf(src);          // src.r becomes the source address register
+        int rs = src.r & 0x00ff;
+        genAddrOf(dst);          // dst.r becomes the destination address register
+        int rd = dst.r & 0x00ff;
+        int off = 0;
+        while (off < size) {
+            int rem = size - off;
+            int chunk = rem >= 8 ? 8 : rem >= 4 ? 4 : rem >= 2 ? 2 : 1;
+            int tmp = allocTemp();
+            enc.movLoad(chunk, tmp, rs, off, false);
+            enc.movStore(chunk, tmp, rd, off);
+            freeReg(tmp);
+            off += chunk;
+        }
+        freeReg(rs);
+        freeReg(rd);
+    }
+
 
     /** unary *: turn a pointer value into the pointed-to lvalue. */
     public void genDeref(SValue v) {
@@ -646,7 +687,9 @@ public final class VGen {
     /** call fn with nbArgs args; the first min(6,nbArgs) were spilled to the machine stack
      *  during parsing, args 7+ are on the value stack [fn, a7..aN]. */
     public void gfuncCall(int nbArgs) {
-        SValue fn = vstack[vtop - Math.max(0, nbArgs - 6) - 1];
+        int fnIdx = vtop - Math.max(0, nbArgs - 6) - 1;
+        if (fnIdx < 0) throw new IllegalStateException("call underflow @" + dbgFile + ":" + dbgLine + " nbArgs=" + nbArgs + " vtop=" + vtop);
+        SValue fn = vstack[fnIdx];
         // snapshot the used-state of the arg registers so we can restore it after the call
         // (they overlap TEMP_POOL; leaving them marked would leak them across calls)
         boolean[] argWasUsed = new boolean[16];
