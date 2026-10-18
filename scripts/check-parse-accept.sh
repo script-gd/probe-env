@@ -6,7 +6,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 mkdir -p tmp/classes
-javac -d tmp/classes jtcc/src/jtcc/*.java jtcc/src/jtcc/*/*.java
+javac -d tmp/classes jtcc/src/jtcc/*.java jtcc/src/jtcc/*/*.java jtcc/src/jtcc/backend/*/*.java
 
 W=tmp/parse-acc
 rm -rf "$W"; mkdir -p "$W"
