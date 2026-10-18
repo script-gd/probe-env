@@ -48,6 +48,8 @@ public final class ElfObj {
         return symbols.size() - 1;
     }
 
+    public SymDef getSymbol(int id) { return symbols.get(id); }
+
     /** true when the symbol is local (static) — safe for direct RIP-relative PC32 access in PIC.
      *  Global/undefined symbols are potentially preemptible and need GOT-relative access. */
     public boolean symbolIsLocal(int id) {

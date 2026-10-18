@@ -607,9 +607,25 @@ public final class Parser {
             return true;
         }
         if (tok().is("asm") || tok().is("__asm") || tok().is("__asm__")) {
-            // file-scope asm("...") block (tccasm.c asm_global_instr path comes in M4)
+            // file-scope asm("...") block: assemble the adjacent string literals (M4 subset)
             next();
-            parseAttribute();
+            if (gen != null && tok().is("(")) {
+                expect("(");
+                StringBuilder sb = new StringBuilder();
+                while (tok().kind == CTok.Kind.STR || tok().kind == CTok.Kind.LSTR) {
+                    if (tok().str != null) {
+                        byte[] b = tok().str;
+                        int n = b.length;
+                        if (n > 0 && b[n - 1] == 0) n--; // strip trailing NUL
+                        for (int i = 0; i < n; i++) sb.append((char) (b[i] & 0xff));
+                    }
+                    next();
+                }
+                expect(")");
+                jtcc.backend.x86_64.Asm.assemble(sb.toString(), gen.st);
+            } else {
+                parseAttribute();
+            }
             expect(";");
             return true;
         }
@@ -828,6 +844,8 @@ public final class Parser {
      *  `;` at block depth 0 is followed directly by `}`. */
     private boolean isLastExprStmt() {
         CTok t0 = tok();
+        if (t0.is(";")) return false; // empty statement, no result value
+        if (t0.kind == CTok.Kind.IDENT && toks.get(pos + 1).is(":")) return false; // label prefix
         if (t0.kind == CTok.Kind.KEYWORD) return false; // decl / control-flow keyword
         if (t0.kind == CTok.Kind.IDENT && typedefs.get(t0.text) != null) return false; // typedef decl
         int depth = 0;
@@ -927,9 +945,10 @@ public final class Parser {
                 }
                 if (gen != null) {
                     int begin = gen.label();
-                    if (!tok().is(";")) expr(); // condition value stays on stack for gjmpIfZero
+                    boolean hasCond = !tok().is(";");
+                    if (hasCond) expr(); // condition value stays on stack for gjmpIfZero
                     expect(";");
-                    int jz = gen.gjmpIfZero();
+                    int jz = hasCond ? gen.gjmpIfZero() : -1; // empty condition: always true, no jump
                     int bodyAt = gen.enc.jmpRel32();
                     int incrAt = gen.label();
                      if (!tok().is(")")) { int b = gen != null ? gen.vtop : 0; expr(); if (gen != null) while (gen.vtop > b) gen.vpop(); }
@@ -1080,6 +1099,8 @@ public final class Parser {
         if (t.kind != CTok.Kind.IDENT) { if (addrOf) pos--; return false; }
         // resolve the identifier to a function symbol (global fn or extern fn)
         String name = t.text;
+        // enum constants are scalars, not symbol references: let the caller const-eval them
+        if (enumConsts.containsKey(name)) { if (addrOf) pos--; return false; }
         Sym target = null;
         for (Map<String, Sym> scope : globalStack) { target = scope.get(name); if (target != null) break; }
         int tid = -1;

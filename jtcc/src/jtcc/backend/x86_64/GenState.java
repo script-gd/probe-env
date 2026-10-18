@@ -39,6 +39,16 @@ public final class GenState {
     }
 
     public int addFuncSymbol(String name, boolean global) {
+        // reconcile a forward reference: a use-before-def created an undef entry; patch it in place
+        Integer fwd = undefByName.get(name);
+        if (fwd != null) {
+            ElfObj.SymDef sd = obj.getSymbol(fwd);
+            sd.info = (global ? ElfObj.STB_GLOBAL : ElfObj.STB_LOCAL) << 4 | ElfObj.STT_FUNC;
+            sd.shndx = obj.sectionIndex(text);
+            sd.value = ind;
+            undefByName.remove(name);
+            return fwd;
+        }
         ElfObj.SymDef sd = new ElfObj.SymDef(name, (global ? ElfObj.STB_GLOBAL : ElfObj.STB_LOCAL) << 4 | ElfObj.STT_FUNC);
         sd.shndx = obj.sectionIndex(text);
         sd.value = ind;
