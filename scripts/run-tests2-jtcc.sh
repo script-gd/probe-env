@@ -27,6 +27,7 @@ for name in "${TESTS[@]}"; do
   extra=()
   case "$name" in
     31_args) extra=(arg1 arg2 arg3 arg4 arg5);;
+    46_grep) cp "$c" "$name.c"; extra=('[^* ]*[:a:d: ]+\:\*-/: $' "$name.c");;
     104_inline) extra=();; # multi-TU later
   esac
   if ! timeout 60 java -cp "$JAVAC_CP" jtcc.Main cc "$c" -I"$SRC" --sys="$ROOT/tmp/tcc-ref/include" --sys=/usr/include/x86_64-linux-gnu --sys=/usr/include -o "$name.o" >/dev/null 2>&1; then

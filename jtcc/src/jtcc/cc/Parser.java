@@ -52,7 +52,7 @@ public final class Parser {
 
     // ------------------------------------------------------- token access
     private CTok tok() { return toks.get(pos); }
-    private CTok next() { return toks.get(pos++); }
+    private CTok next() { CTok t = toks.get(pos++); if (gen != null) gen.dbgLine = t.line; return t; }
     private boolean accept(String s) { if (tok().is(s)) { pos++; return true; } return false; }
     private void expect(String s) {
         if (!accept(s)) error("expected '" + s + "' got '" + tok().text + "'");

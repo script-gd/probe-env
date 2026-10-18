@@ -25,6 +25,7 @@ public final class VGen {
 
     // frame state
     public int loc;                 // frame offset (tcc loc, negative)
+    public int dbgLine;             // current source line (parser-fed, for diagnostics)
     public int funcSubSpOffset;     // backpatch offset for sub rsp
     private static final int FUNC_PROLOG_SIZE = 11; // push rbp(1) + mov rbp,rsp(3) + sub rsp,imm32(3+4)
 
@@ -38,7 +39,32 @@ public final class VGen {
 
     private int allocTemp() {
         for (int r : TEMP_POOL) if (!used[r]) { used[r] = true; return r; }
-        throw new IllegalStateException("out of registers");
+        // out of registers: spill the deepest value-stack entry holding a plain temp register
+        for (int i = 0; i < vtop; i++) {
+            SValue v = vstack[i];
+            int rr = v.r & 0x00ff;
+            boolean plainValue = (v.r & (Sym.VT_LVAL | Sym.VT_SYM)) == 0 && isTempReg(rr);
+            if (plainValue) {
+                loc -= 8; // 8-byte spill slot (frame size backpatched in the epilogue)
+                enc.movStore(8, rr, X64Enc.R_RBP, loc);
+                v.r = Sym.VT_LOCAL | Sym.VT_LVAL;
+                v.c = loc;
+                return rr; // rr now free for the new use (caller marks it via the returned path)
+            }
+        }
+        StringBuilder sb = new StringBuilder("used:");
+        for (int r = 0; r < 16; r++) if (used[r]) sb.append(' ').append(r);
+        sb.append(" | vstack:");
+        for (int i = 0; i < vtop; i++) {
+            SValue v = vstack[i];
+            sb.append(" [r=").append(v.r).append(" c=").append(v.c).append(v.type != null && v.type.isArray() ? " arr" : "").append(']');
+        }
+        throw new IllegalStateException("out of registers @" + dbgLine + " " + sb);
+    }
+
+    private static boolean isTempReg(int r) {
+        for (int t : TEMP_POOL) if (t == r) return true;
+        return false;
     }
 
     private void freeReg(int r) {
@@ -89,6 +115,15 @@ public final class VGen {
     public int gv() {
         SValue v = vtop();
         if ((v.r & Sym.VT_LVAL) != 0) {
+            if (v.type.isArray()) {
+                // array lvalue decays to &a[0]: its rvalue is the address, not a content load
+                CType elem = (v.type.ref != null && v.type.ref.type != null) ? v.type.ref.type : new CType(CType.VT_INT, null);
+                genAddrOf(v);
+                CType pt = new CType(CType.VT_PTR, null);
+                Sym ref = new Sym(null); ref.type = elem; pt.ref = ref;
+                v.type = pt;
+                return v.r & 0x00ff;
+            }
             // lvalue: load the pointed value into a register
             int r = (v.r & 0x00ff) < Sym.VT_CONST ? v.r & 0x00ff : -1;
             if (r < 0) r = allocTemp();
@@ -612,6 +647,10 @@ public final class VGen {
      *  during parsing, args 7+ are on the value stack [fn, a7..aN]. */
     public void gfuncCall(int nbArgs) {
         SValue fn = vstack[vtop - Math.max(0, nbArgs - 6) - 1];
+        // snapshot the used-state of the arg registers so we can restore it after the call
+        // (they overlap TEMP_POOL; leaving them marked would leak them across calls)
+        boolean[] argWasUsed = new boolean[16];
+        for (int ar : ARG_REGS) argWasUsed[ar] = used[ar];
         // register args (first 6): popped from the machine stack (spilled during parsing)
         int regArgs = Math.min(nbArgs, 6);
         for (int i = regArgs - 1; i >= 0; i--) {
@@ -652,6 +691,9 @@ public final class VGen {
         }
         // restore temps
         for (int i = saved.size() - 1; i >= 0; i--) enc.pop(saved.get(i));
+        // restore arg registers' used-state: the args are consumed by the call; any arg
+        // register that held a pre-call value was preserved by the save/restore above
+        for (int ar : ARG_REGS) used[ar] = argWasUsed[ar];
         // pop fn from the value stack, push result in rax
         vtop--;
         SValue res = vpush();
