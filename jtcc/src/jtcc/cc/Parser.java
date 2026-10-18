@@ -576,8 +576,7 @@ public final class Parser {
                     break;
                 }
                 if (!tok().is("]")) {
-                    if (!localStack.isEmpty()) exprEq(); // VLA: any runtime expr (tcc nocode_wanted path)
-                    else n = exprConst64();
+                    n = exprConst64(); // constant bounds get their value; VLA degrades to 0 for now
                 }
                 expect("]");
                 Sym arr = new Sym(null);
@@ -672,8 +671,7 @@ public final class Parser {
             } else if (gen != null && !localStack.isEmpty() && storageClass != Sym.VT_CONST) {
                 // local variable: allocate stack, optional initializer store
                 int sz = Math.max(1, jtcc.backend.x86_64.VGen.typeSize(sym.type));
-                gen.loc -= sz;
-                gen.loc = (gen.loc - (sz - 1)) & -sz;
+                gen.loc = (gen.loc - sz) & -Math.max(1, alignOf(sym.type)); // size then align (tcc layout)
                 sym.r = Sym.VT_LOCAL | Sym.VT_LVAL;
                 sym.c = gen.loc;
                 localStack.peek().put(sym.name, sym);
@@ -688,9 +686,19 @@ public final class Parser {
                 }
             } else {
                 declareGlobal(sym);
+                if (gen != null) {
+                    boolean isExtern = (type.t & CType.VT_EXTERN) != 0;
+                    boolean hasInit = tok().is("=");
+                    genDefineGlobal(sym, type, isExtern, hasInit);
+                }
                 if (accept("=")) {
-                    // initializer — parse and discard for now (M3 does codegen)
-                    skipInitializer();
+                    // scalar constant initializers get real .data contents (M3)
+                    if (gen != null && sym.symId != 0 && !tok().is("{") && tok().kind != CTok.Kind.STR && tok().kind != CTok.Kind.LSTR) {
+                        long v = exprConst64();
+                        writeGlobalInit(sym, v);
+                    } else {
+                        skipInitializer();
+                    }
                 }
             }
             if (!accept(",")) break;
@@ -907,6 +915,38 @@ public final class Parser {
         }
     }
 
+    // ------------------------------------------------------- globals (M3)
+
+    /** define a file-scope data symbol (.data with scalar init, .bss for zero-init). */
+    private void genDefineGlobal(Sym sym, CType declType, boolean isExtern, boolean hasInit) {
+        if (isExtern) return;
+        int sz = Math.max(1, jtcc.backend.x86_64.VGen.typeSize(sym.type));
+        if (hasInit) {
+            int off = gen.st.data.size;
+            sym.symId = gen.st.addDataSymbol(sym.name, gen.st.data, off, true);
+            gen.st.data.add(new byte[sz]);
+            dataInitOff.put(sym.name, off);
+        } else {
+            int off = gen.st.bss.size;
+            sym.symId = gen.st.addDataSymbol(sym.name, gen.st.bss, off, true);
+            gen.st.bss.size += sz;
+        }
+    }
+
+    private final Map<String, Integer> dataInitOff = new HashMap<>();
+
+    /** write a scalar constant into a global's .data slot. */
+    private void writeGlobalInit(Sym sym, long v) {
+        Integer off = dataInitOff.get(sym.name);
+        if (off == null) return;
+        switch (jtcc.backend.x86_64.VGen.typeSize(sym.type)) {
+            case 1: gen.st.data.bytes()[off] = (byte) v; break;
+            case 2: gen.st.data.patchLe16(off, (int) v); break;
+            case 4: gen.st.data.patchLe32(off, (int) v); break;
+            default: gen.st.data.patchLe64(off, v); break;
+        }
+    }
+
     // ------------------------------------------------------- pointers (M3)
 
     private int elemSize(CType t) {
@@ -1049,12 +1089,12 @@ public final class Parser {
                 int r = gen.gv();
                 gen.enc.test(r);
                 gen.enc.setcc(5, r);
-                gen.enc.movzxR32R8(r, r);          // (b != 0)
-                gen.freeRegPublic(r);
+                gen.enc.movzxR32R8(r, r);          // (b != 0) in r
+                gen.vtop().r = r;                  // result register
                 int jend = gen.enc.jmpRel32();
                 if (jtrue >= 0) {
                     gen.gsym(jtrue);
-                    gen.vpushConst(new CType(CType.VT_INT, null), 1);
+                    gen.enc.movImm32SignExt(r, 1); // true branch writes 1 into the SAME register
                     gen.enc.patchRel32(jend, gen.label());
                 }
             } else {
@@ -1075,12 +1115,12 @@ public final class Parser {
                 int r = gen.gv();
                 gen.enc.test(r);
                 gen.enc.setcc(5, r);
-                gen.enc.movzxR32R8(r, r);          // (b != 0)
-                gen.freeRegPublic(r);
+                gen.enc.movzxR32R8(r, r);          // (b != 0) in r
+                gen.vtop().r = r;                  // result register
                 int jend = gen.enc.jmpRel32();
                 if (jfalse >= 0) {
                     gen.gsym(jfalse);
-                    gen.vpushConst(new CType(CType.VT_INT, null), 0);
+                    gen.enc.movImm32SignExt(r, 0); // false branch writes 0 into the SAME register
                     gen.enc.patchRel32(jend, gen.label());
                 }
             } else {

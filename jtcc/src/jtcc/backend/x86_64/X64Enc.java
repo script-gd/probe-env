@@ -89,10 +89,15 @@ public final class X64Enc {
 
     /** mov r, [rip+disp] with symbol reloc (R_X86_64_PC32, addend-4). */
     public void movLoadRipSym(int size, int dst, int symIndex) {
+        movLoadRipSym(size, dst, symIndex, 0);
+    }
+
+    /** mov r, [rip+disp+off] with symbol reloc (addend = off-4). */
+    public void movLoadRipSym(int size, int dst, int symIndex, int off) {
         rex(size == 8, dst, 0, 0);
         st.g(0x8b);
         st.g((0 << 6) | ((dst & 7) << 3) | 5); // [rip+disp32]
-        st.reloca(st.text, symIndex, st.text.size, GenState_R.R_X86_64_PC32, -4);
+        st.reloca(st.text, symIndex, st.text.size, GenState_R.R_X86_64_PC32, off - 4);
         st.le32(0);
     }
 
@@ -202,9 +207,9 @@ public final class X64Enc {
 
     /** setcc /0: 4=Z 5=NZ 0xC=L 0xD=LE 0xE=G 0xF=GE 2=B 3=BE 6=A 7=AE */
     public void setcc(int cond, int r) {
+        if (r >= 8) st.g(0x41);  // REX prefix comes FIRST (before the 0F escape)
         st.g(0x0f);
         st.g(0x90 + cond);
-        if (r >= 8) st.g(0x41);
         st.g(0xc0 + (r & 7));
     }
 

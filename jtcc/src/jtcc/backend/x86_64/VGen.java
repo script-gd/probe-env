@@ -104,6 +104,18 @@ public final class VGen {
     public void load(int r, SValue sv) {
         boolean w = is64(sv.type);
         int sz = typeSize(sv.type);
+        if ((sv.r & Sym.VT_LVAL) != 0) {
+            // lvalue: load the pointed value (global symbol, local, or base register)
+            if ((sv.r & Sym.VT_SYM) != 0) {
+                enc.movLoadRipSym(sz, r, sv.symId, (int) sv.c);
+            } else if ((sv.r & 0x00ff) == Sym.VT_LOCAL) {
+                enc.movLoad(sz, r, X64Enc.R_RBP, (int) sv.c, sv.type.isUnsigned());
+            } else if ((sv.r & 0x00ff) < Sym.VT_CONST) {
+                int base = sv.r & 0x00ff;
+                enc.movLoad(sz, r, base, (int) sv.c, sv.type.isUnsigned());
+            }
+            return;
+        }
         if ((sv.r & 0x00ff) == Sym.VT_CONST) {
             if ((sv.r & Sym.VT_SYM) != 0) {
                 // symbol address
@@ -120,19 +132,7 @@ public final class VGen {
                 enc.movImm(r, sv.c, true);
             }
         } else if ((sv.r & 0x00ff) == Sym.VT_LOCAL) {
-            // local on stack
-            if ((sv.r & Sym.VT_LVAL) != 0 && sv.symId < 0) {
-                enc.movLoad(sz, r, X64Enc.R_RBP, (int) sv.c, sv.type.isUnsigned());
-            } else {
-                enc.lea(r, X64Enc.R_RBP, (int) sv.c);
-            }
-        } else if ((sv.r & Sym.VT_SYM) != 0 && (sv.r & Sym.VT_LVAL) != 0) {
-            enc.movLoadRipSym(sz, r, sv.symId);
-            if (sv.c != 0) { /* offset addend: fold into reloc addend instead (M3 simple path) */ }
-        } else if ((sv.r & Sym.VT_LVAL) != 0 && (sv.r & 0x00ff) < Sym.VT_CONST) {
-            int base = sv.r & 0x00ff;
-            enc.movLoad(sz, r, base, (int) sv.c, sv.type.isUnsigned());
-            if (base != r) freeReg(base);
+            enc.lea(r, X64Enc.R_RBP, (int) sv.c);
         }
     }
 
@@ -142,11 +142,11 @@ public final class VGen {
         if ((sv.r & 0x00ff) == Sym.VT_LOCAL) {
             enc.movStore(sz, r, X64Enc.R_RBP, (int) sv.c);
         } else if ((sv.r & Sym.VT_SYM) != 0 && (sv.r & Sym.VT_LVAL) != 0) {
-            // store to global: mov [rip+sym], r
+            // store to global: mov [rip+sym+off], r
             enc.rex(sz == 8, r, 0, 0);
             st.g(0x89);
             st.g((0 << 6) | ((r & 7) << 3) | 5);
-            st.reloca(st.text, sv.symId, st.text.size, jtcc.elf.ElfObj.R_X86_64_PC32, -4);
+            st.reloca(st.text, sv.symId, st.text.size, jtcc.elf.ElfObj.R_X86_64_PC32, sv.c - 4);
             st.le32(0);
         } else if ((sv.r & Sym.VT_LVAL) != 0 && (sv.r & 0x00ff) < Sym.VT_CONST) {
             int base = sv.r & 0x00ff;
@@ -161,6 +161,10 @@ public final class VGen {
     }
 
     public static int typeSize(CType t) {
+        if (t.isArray() && t.ref != null) {
+            int elem = typeSize(t.ref.type);
+            return Math.max(0, t.ref.c) * elem;
+        }
         switch (t.btype()) {
             case CType.VT_BOOL: case CType.VT_BYTE: return 1;
             case CType.VT_SHORT: return 2;
@@ -279,8 +283,15 @@ public final class VGen {
                 break;
             }
             case "/": case "%": {
-                // idiv: dividend in rax, quotient->rax, remainder->rdx
+                // idiv: dividend in rax, sign-extend to rdx:rax, divisor must NOT be rdx
                 if (ra != X64Enc.R_EAX) { enc.rex(w, ra, 0, X64Enc.R_EAX); st.g(0x89); enc.modrmRR(ra, X64Enc.R_EAX); freeReg(ra); }
+                if (rb == X64Enc.R_EDX) {
+                    // cqo writes rdx: move the divisor out of rdx first
+                    int tmp = allocTemp();
+                    enc.rex(w, rb, 0, tmp); st.g(0x89); enc.modrmRR(rb, tmp);
+                    freeReg(rb);
+                    rb = tmp;
+                }
                 used[X64Enc.R_EDX] = true;
                 if (w) enc.cqo(); else enc.cdq();
                 enc.idiv(rb);
@@ -505,6 +516,10 @@ public final class VGen {
 
     /** pointer/integer arithmetic with element-size scaling: p + n*elsize or n*elsize + p or p - n*elsize. */
     public void genPtrArith(SValue ptr, SValue n, int elsize, boolean sub) {
+        // array decay: an array lvalue decays to &a[0] before pointer arithmetic
+        if (ptr.type.isArray() && (ptr.r & Sym.VT_LVAL) != 0) {
+            genAddrOf(ptr);
+        }
         // scale n by elsize if needed
         if (elsize != 1) {
             int rn = (n.r & 0x00ff) < Sym.VT_CONST ? n.r & 0x00ff : -1;
@@ -555,30 +570,50 @@ public final class VGen {
         X64Enc.R_EDI, X64Enc.R_ESI, X64Enc.R_EDX, X64Enc.R_ECX, X64Enc.R_R8, X64Enc.R_R9
     };
 
+    /** materialize an argument value into a register (lvalues are dereferenced). */
+    private int materialize(SValue arg) {
+        if ((arg.r & Sym.VT_LVAL) != 0) {
+            int r = (arg.r & 0x00ff) < Sym.VT_CONST ? arg.r & 0x00ff : -1;
+            if (r < 0) r = allocTemp();
+            load(r, arg); // for base-reg lvals this is movLoad through the base
+            return r;
+        }
+        int r = (arg.r & 0x00ff) < Sym.VT_CONST ? arg.r & 0x00ff : -1;
+        if (r >= 0) return r;
+        r = allocTemp();
+        load(r, arg);
+        return r;
+    }
+
     /** call fn with nbArgs args already on the value stack [fn, a1..aN]. Result in rax. */
     public void gfuncCall(int nbArgs) {
         SValue fn = vstack[vtop - nbArgs - 1];
         // save all used temps (caller-saved incl. the arg registers)
         java.util.List<Integer> saved = new java.util.ArrayList<>();
         for (int r : TEMP_POOL) if (used[r]) { enc.push(r); saved.add(r); }
-        // evaluate args left-to-right and push onto the machine stack
+        // SysV ordering: save temps, then the alignment pad, then stack args (7+) in
+        // reverse, then register args popped into arg registers. The callee's stack args
+        // then sit at [rsp+8..] untouched by the pad.
+        // 16-byte alignment pad goes right after the saved temps
+        int pushes = saved.size() + Math.max(0, nbArgs - 6);
+        if ((pushes & 1) != 0) enc.push(X64Enc.R_EAX);
+        // evaluate stack args (7+) first in reverse
+        for (int i = nbArgs - 1; i >= 6; i--) {
+            SValue arg = vstack[vtop - nbArgs + i];
+            int r = materialize(arg);
+            boolean temp = true;
+            // heuristic: only pool-allocated temps are freed immediately
+            enc.push(r);
+            if (temp && arg.r != r) freeReg(r);
+        }
+        // register args (first 6): push in order
         java.util.List<Integer> argTemps = new java.util.ArrayList<>();
         int regArgs = Math.min(nbArgs, 6);
         for (int i = 0; i < regArgs; i++) {
             SValue arg = vstack[vtop - nbArgs + i];
-            int r = (arg.r & 0x00ff) < Sym.VT_CONST ? arg.r & 0x00ff : -1;
-            if (r < 0) { r = allocTemp(); load(r, arg); }
+            int r = materialize(arg);
             argTemps.add(r);
             enc.push(r);
-        }
-        // SysV: args 7+ go on the stack, arg7 at [rsp] — push them in reverse order
-        for (int i = nbArgs - 1; i >= 6; i--) {
-            SValue arg = vstack[vtop - nbArgs + i];
-            int r = (arg.r & 0x00ff) < Sym.VT_CONST ? arg.r & 0x00ff : -1;
-            boolean temp = false;
-            if (r < 0) { r = allocTemp(); load(r, arg); temp = true; }
-            enc.push(r);
-            if (temp) freeReg(r);
         }
         // pop into SysV arg registers in reverse order
         for (int i = regArgs - 1; i >= 0; i--) enc.pop(ARG_REGS[i]);
@@ -586,12 +621,6 @@ public final class VGen {
         for (int r : argTemps) freeReg(r);
         // SysV: AL = number of SSE registers used for variadic calls (0 for integer-only)
         enc.binopRR(0x33, X64Enc.R_EAX, X64Enc.R_EAX); // xor eax, eax
-        // 16-byte stack alignment at the call: register args were popped into argRegs,
-        // net pending change at the call = saved temps + stack-passed args (7+).
-        int pushes = saved.size() + Math.max(0, nbArgs - 6);
-        if ((pushes & 1) != 0) {
-            st.g(0x50); // push rax as 8-byte pad
-        }
         // call
         if ((fn.r & Sym.VT_SYM) != 0) {
             enc.callRel32(fn.symId);
