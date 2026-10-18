@@ -37,6 +37,18 @@ jobs:
       - name: M3 codegen gate (tests2 execution subset)
         run: ./scripts/run-tests2-jtcc.sh 00_assignment 01_comment 04_for 05_array 06_case 07_function 08_while 09_do_while 10_pointer 11_precedence 12_hashdefine 13_integer_literals 14_if 15_recursion 16_nesting 17_enum 19_pointer_arithmetic 20_pointer_comparison 25_quicksort 27_sizeof 30_hanoi 31_args 32_led 37_sprintf 38_multiple_array_index 42_function_pointer
 
+      - name: fixture compiles to .o and links into a dlopen-able .so (jtcc, M3+M4+M5)
+        run: |
+          set -e
+          mkdir -p tmp/fixt
+          java -cp tmp/classes jtcc.Main cc fixture/entry.c -Ifixture/include/gdcc -Ifixture/include/godot --sys=tmp/tcc-ref/include --sys=/usr/include/x86_64-linux-gnu --sys=/usr/include -o tmp/fixt/entry.o
+          java -cp tmp/classes jtcc.Main cc fixture/include/godot/godot_binding.c -Ifixture/include/gdcc -Ifixture/include/godot --sys=tmp/tcc-ref/include --sys=/usr/include/x86_64-linux-gnu --sys=/usr/include -o tmp/fixt/godot_binding.o
+          java -cp tmp/classes jtcc.Main cc fixture/include/gdcc/gdcc_coroutine.c -Ifixture/include/gdcc -Ifixture/include/godot --sys=tmp/tcc-ref/include --sys=/usr/include/x86_64-linux-gnu --sys=/usr/include -o tmp/fixt/gdcc_coroutine.o
+          java -cp tmp/classes jtcc.Main cc fixture/include/gdcc/gdcc_hrx.c -Ifixture/include/gdcc -Ifixture/include/godot --sys=tmp/tcc-ref/include --sys=/usr/include/x86_64-linux-gnu --sys=/usr/include -o tmp/fixt/gdcc_hrx.o
+          java -cp tmp/classes jtcc.Main cc fixture/include/gdcc/minicoro.c -Ifixture/include/gdcc -Ifixture/include/godot --sys=tmp/tcc-ref/include --sys=/usr/include/x86_64-linux-gnu --sys=/usr/include -o tmp/fixt/minicoro.o
+          cc -shared -Wl,-Bsymbolic -o tmp/fixt/libprobe-jtcc.so tmp/fixt/entry.o tmp/fixt/godot_binding.o tmp/fixt/gdcc_coroutine.o tmp/fixt/gdcc_hrx.o tmp/fixt/minicoro.o
+          python3 -c "import ctypes; ctypes.CDLL('tmp/fixt/libprobe-jtcc.so'); print('jtcc fixture .so dlopen OK')"
+
       - name: Smoke-test the produced shared library
         run: python3 -c "import ctypes; ctypes.CDLL('tmp/tcc-ref/libprobe.so'); print('dlopen OK')"
 

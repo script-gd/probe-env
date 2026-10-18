@@ -57,6 +57,8 @@
 
 ### M3 — x86_64 代码生成
 
+**M3 当前状态（2026-10-18）**：`jtcc.backend.x86_64.VGen`/`X64Enc` + `jtcc.elf.*` 已落地 SysV AMD64 整数值栈机、寄存器分配（含温度寄存器溢出到帧槽）、函数调用（PLT32、参数溢出防 RAX 覆盖）、结构体按值（`genStructCopy`、8/24 字节 fixture 不透明 blob 的返回/传参/赋值）、复合字面量、语句表达式（捕获尾表达式值）、switch/比较/指针运算、全局 .data/.bss/COMMON。**fixture 5 TU 全部编译为合法 ELF `.o`**。tests2 执行门控 27 项通过（CI：`scripts/run-tests2-jtcc.sh` 基线子集）。**已知缺口**：浮点 SSE 代码路径（当前浮点常量压占位值；fixture 895 处 `godot_float` 需 SSE）、位域代码生成、数组初始化器边界推导、VLA、复杂表达式深度寄存器压力（33_ternary_op yarpgen 压力用例）。
+
 移植 `x86_64-gen.c` + `tccgen.c` 的代码生成一半（`gv/gv2/gen_op/gstore/gjmp`、SValue 栈机、寄存器分类 `reg_classes`、SysV AMD64 ABI 分类与 `gfunc_call/gfunc_prolog/gfunc_epilog`、struct 值传递/返回、`__builtin_va_*` 与 `__va_arg`、VLA 的 `gen_vla_*`、原子内建降级为 `__atomic_*` 助手调用）。
 
 - **门**：tests2 中选定核心子集（00-09 基础、10-13 算术/指针/数组、22/24 浮点与数学库、42 函数指针、63-66 结构体/联合、76-79、86-97 的 ABI 相关项）编译为 `.o`，用系统 `cc` 链接运行，输出对齐 `.expect`。
@@ -64,6 +66,8 @@
 - **风险**：SSE/x87 混合返回（`gfunc_sret`）、`long double` x87 代码路径、寄存器压力下的栈溢顺序——全部以测试差分兜底。
 
 ### M4 — x86_64 汇编器（Java 重写，明确保留）
+
+**M4 当前状态（2026-10-18，聚焦子集）**：`jtcc.backend.x86_64.Asm` 落地文件级 `__asm__` 裸块的聚焦汇编器（AT&T 语法）：movq 全形式（reg↔reg/reg↔mem+位移）、leaq `%rip` 相对局部标签、jmp `*reg`/`*mem`、ret、`.L` 局部标签与前向引用回填、`.globl` 导出为 FUNC 符号。minicoro 的 `_mco_wrap_main`/`_mco_switch` 上下文切换块汇编出正确字节。**fixture 5 TU → `.o` → 链接成 `libprobe.so` → `dlopen` 成功**。完整 `i386-asm.c` 忠实移植（操作数约束、内联 asm）留待后续。
 
 移植 `i386-asm.c` + `x86_64-asm.h` + `tccasm.c` 的文件级 `__asm__` 路径（`asm_instr` 的操作数约束解析只做 fixture 用到的子集；文件级裸块为主）。
 
@@ -74,12 +78,16 @@
 
 ### M5 — ELF `.o` 写出
 
+**M5 当前状态（2026-10-18）**：`jtcc.elf.ElfObj`/`Section` 落地——节区生长缓冲（含序言回填预留）、符号表（局部符号排前 + 重定位索引重映射）、`.text/.data/.rodata/.bss`、重定位（`R_X86_64_64/PC32/PLT32/GOTPCREL`）、COMMON 暂定定义、static 全局 LOCAL 绑定、前向引用就地调和。fixture 的 5 个 `.o` 均为合法 ELF 且被系统 `cc`/`ld` 接受。
+
 移植 `tccelf.c` 的 `elf_output_obj` 路径：节区（`Section` 生长缓冲）、符号表、重定位项（`greloca`）、`stt` 类型/绑定、`stt_common`/`.bss`、`.rodata` 合并、COMDAT 简化。
 
 - **门**：tests2 子集 `jtcc → .o → cc 链接 → 运行` 全过；`readelf -a` 与参考 tcc `.o` 结构对比；`146_tls_extern`（系统 `cc` 链接互操作：tcc 产物的未定义 TLS 符号）通过。
 - **估**：2k 行 Java。
 
 ### M6 — ELF `.so` 链接器
+
+**M6 当前状态（2026-10-18，过渡方案）**：当前用系统 `cc -shared -Wl,-Bsymbolic` 链接 5 个 jtcc `.o` 为 `libprobe.so`（非自研链接器）。jtcc 侧已就绪 PIC：调用走 PLT32、非局部数据符号走 GOTPCREL、本地符号直接 PC32。**`.so` 可被 `dlopen` 加载且符号全解析**。自研 ELF `.so` 链接器（`.dynsym`/GOT/PLT 生成等）仍是后续工作。
 
 移植 `tccelf.c` 的 `elf_output_file`(DLL 分支)：`.dynsym/.dynstr/.hash/.gnu.hash`、`.dynamic` 标签、GOT/PLT 生成（`build_got_entries`/`create_plt_entry`/`relocate_plt`）、`.rela.dyn/.rela.plt`、`R_X86_64_*` 应用、DT_NEEDED 解析（`libc.so` 链接器脚本子集：仅 `GROUP(...)` 文件列表）、`libtcc1.a` 归档成员按需提取、`tcc_load_archive`/`.so` 读取、`-soname` 等。
 
