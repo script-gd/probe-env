@@ -14,6 +14,7 @@ public final class Sym {
 
     public final String name;      // null for anonymous
     public CType type = new CType();
+    public int symId;              // symbol table index for globals/functions (0 = unassigned)
     public int r;                  // register or VT_CONST/VT_LOCAL (+VT_LVAL)
     public int c;                  // offset (locals), field offset, enum value idx, label id...
     public long v;                 // constant value / enum value

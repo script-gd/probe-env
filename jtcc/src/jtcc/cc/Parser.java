@@ -19,14 +19,17 @@ public final class Parser {
     private final List<CTok> toks;
     private int pos;
     private final Diag diag;
-    private final CodeGen gen;
-
     public interface Diag {
         void error(String file, int line, String msg);
         void warn(String file, int line, String msg);
     }
 
     // ------------------------------------------------------- symbol tables (tccgen.c stacks)
+    /** M3 code generator; null in parse-only mode. */
+    public jtcc.backend.x86_64.VGen gen;
+    /** string literal counter for rodata labels. */
+    private int strLitCount;
+
     private final Deque<Map<String, Sym>> globalStack = new ArrayDeque<>();
     private final Deque<Map<String, Sym>> localStack = new ArrayDeque<>();
     private final Map<String, Sym> typedefs = new HashMap<>();      // typedef names (global for now)
@@ -42,10 +45,9 @@ public final class Parser {
     private final List<SValue> vstack = new ArrayList<>();
     private int vtop; // index of top
 
-    public Parser(List<CTok> toks, Diag diag, CodeGen gen) {
+    public Parser(List<CTok> toks, Diag diag) {
         this.toks = toks;
         this.diag = diag;
-        this.gen = gen;
     }
 
     // ------------------------------------------------------- token access
@@ -659,13 +661,31 @@ public final class Parser {
                     }
                 }
                 if (tok().is("{")) {
-                    // function definition
+                    // function definition: register the symbol before compiling the body
+                    declareGlobal(sym);
                     parseFunction(sym);
                     if (krScope) popStructScope();
                     return true;
                 }
                 if (krScope) popStructScope();
                 declareGlobal(sym);
+            } else if (gen != null && !localStack.isEmpty() && storageClass != Sym.VT_CONST) {
+                // local variable: allocate stack, optional initializer store
+                int sz = Math.max(1, jtcc.backend.x86_64.VGen.typeSize(sym.type));
+                gen.loc -= sz;
+                gen.loc = (gen.loc - (sz - 1)) & -sz;
+                sym.r = Sym.VT_LOCAL | Sym.VT_LVAL;
+                sym.c = gen.loc;
+                localStack.peek().put(sym.name, sym);
+                if (accept("=")) {
+                    skipInitializer();
+                    if (gen.vtop > 0) {
+                        SValue rv = gen.vtop();
+                        int r = gen.gv();
+                        gen.store(r, symToLvalue(sym));
+                        gen.vpop();
+                    }
+                }
             } else {
                 declareGlobal(sym);
                 if (accept("=")) {
@@ -689,12 +709,26 @@ public final class Parser {
     private void parseFunction(Sym fn) {
         // new scope for params+body
         localStack.push(new HashMap<>());
-        Sym param = fn.type.ref.next;
-        while (param != null) {
-            if (param.name != null) localStack.peek().put(param.name, param);
-            param = param.next;
+        if (gen != null) {
+            gen.gfuncProlog(fn);
+            Sym param = fn.type.ref.next;
+            while (param != null) {
+                if (param.name != null) {
+                    param.r = Sym.VT_LOCAL | Sym.VT_LVAL;
+                    localStack.peek().put(param.name, param);
+                }
+                param = param.next;
+            }
+            block(0);
+            gen.gfuncEpilog();
+        } else {
+            Sym param = fn.type.ref.next;
+            while (param != null) {
+                if (param.name != null) localStack.peek().put(param.name, param);
+                param = param.next;
+            }
+            block(0);
         }
-        block(0);
         localStack.pop();
     }
 
@@ -714,7 +748,8 @@ public final class Parser {
                 else next();
             }
         } else {
-            expr();
+            // initializer is an assignment-expression (comma operator NOT allowed here)
+            exprEq();
         }
     }
 
@@ -740,39 +775,115 @@ public final class Parser {
             if (t.is(";")) { next(); return; }
         }
         switch (t.kind == CTok.Kind.KEYWORD ? t.text : "") {
-            case "if":
+            case "if": {
                 next(); expect("("); expr(); expect(")");
-                statement();
-                if (accept("else")) statement();
+                if (gen != null) {
+                    int jz = gen.gjmpIfZero();
+                    statement();
+                    if (accept("else")) {
+                        int jend = gen.enc.jmpRel32();
+                        if (jz >= 0) gen.gsym(jz);
+                        statement();
+                        gen.gsym(jend);
+                    } else {
+                        if (jz >= 0) gen.gsym(jz);
+                    }
+                } else {
+                    statement();
+                    if (accept("else")) statement();
+                }
                 return;
-            case "while":
-                next(); expect("("); expr(); expect(")");
-                statement();
+            }
+            case "while": {
+                next();
+                if (gen != null) {
+                    int begin = gen.label();
+                    expect("("); expr(); expect(")");
+                    int jz = gen.gjmpIfZero();
+                    pushBreakContinue(begin);
+                    statement();
+                    int back = gen.enc.jmpRel32();
+                    gen.enc.patchRel32(back, begin);
+                    popLoop();
+                    if (jz >= 0) gen.gsym(jz);
+                    patchBreaks();
+                } else {
+                    expect("("); expr(); expect(")");
+                    statement();
+                }
                 return;
-            case "do":
-                next(); statement();
-                expect("while"); expect("("); expr(); expect(")"); expect(";");
+            }
+            case "do": {
+                next();
+                if (gen != null) {
+                    int begin = gen.label();
+                    pushBreakContinue(begin); // provisional: continue -> cond, patched below
+                    statement();
+                    expect("while"); expect("("); expr(); expect(")");
+                    int condAt = gen.label();
+                    loopStack.get(loopStack.size() - 1)[0] = condAt;
+                    int jnz = gen.gjmpIfNonZero();
+                    if (jnz >= 0) gen.enc.patchRel32(jnz, begin);
+                    popLoop();
+                    patchBreaks();
+                    expect(";");
+                } else {
+                    statement();
+                    expect("while"); expect("("); expr(); expect(")"); expect(";");
+                }
                 return;
-            case "for":
+            }
+            case "for": {
                 next(); expect("(");
                 if (!accept(";")) {
-                    if (!decl(0)) { expr(); expect(";"); }
+                    if (!decl(0)) { expr(); if (gen != null) while (gen.vtop > 0) gen.vpop(); expect(";"); }
                     // decl() consumed its own ';'
                 }
-                if (!tok().is(";")) expr();
-                expect(";");
-                if (!tok().is(")")) expr();
-                expect(")");
-                statement();
+                if (gen != null) {
+                    int begin = gen.label();
+                    if (!tok().is(";")) expr(); // condition value stays on stack for gjmpIfZero
+                    expect(";");
+                    int jz = gen.gjmpIfZero();
+                    int bodyAt = gen.enc.jmpRel32();
+                    int incrAt = gen.label();
+                    if (!tok().is(")")) { expr(); if (gen != null) while (gen.vtop > 0) gen.vpop(); }
+                    int back = gen.enc.jmpRel32();
+                    gen.enc.patchRel32(back, begin);
+                    expect(")");
+                    pushBreakContinue(incrAt);
+                    gen.gsym(bodyAt);
+                    statement();
+                    int end = gen.enc.jmpRel32();
+                    gen.enc.patchRel32(end, incrAt);
+                    popLoop();
+                    if (jz >= 0) gen.gsym(jz);
+                    patchBreaks();
+                } else {
+                    if (!tok().is(";")) expr();
+                    expect(";");
+                    if (!tok().is(")")) expr();
+                    expect(")");
+                    statement();
+                }
                 return;
+            }
             case "switch": next(); expect("("); expr(); expect(")"); statement(); return;
             case "case": next(); exprConst64(); if (accept("...")) exprConst64(); expect(":"); statement(); return;
             case "default": next(); expect(":"); statement(); return;
-            case "break": next(); expect(";"); return;
-            case "continue": next(); expect(";"); return;
+            case "break":
+                next();
+                if (gen != null) genBreak();
+                expect(";");
+                return;
+            case "continue":
+                next();
+                if (gen != null) genContinue();
+                expect(";");
+                return;
             case "return":
                 next();
                 if (!tok().is(";")) expr();
+                if (gen != null) gen.genReturn();
                 expect(";");
                 return;
             case "goto": next(); if (accept("*")) unary(); else if (tok().kind == CTok.Kind.IDENT) next(); expect(";"); return;
@@ -790,8 +901,65 @@ public final class Parser {
                 }
                 if (decl(0)) return;
                 expr();
+                if (gen != null) while (gen.vtop > 0) gen.vpop();
                 expect(";");
+                if (gen != null && System.getenv("JTCC_DBG_REGS") != null) gen.dumpUsed("stmt-end");
         }
+    }
+
+    // ------------------------------------------------------- pointers (M3)
+
+    private int elemSize(CType t) {
+        if (t.isArray() && t.ref != null && t.ref.type != null)
+            return Math.max(1, sizeOfType(t.ref.type));
+        if (t.isPtr() && t.ref != null && t.ref.type != null)
+            return Math.max(1, sizeOfType(t.ref.type));
+        return 1;
+    }
+
+    private CType elemType(CType t) {
+        if ((t.isPtr() || t.isArray()) && t.ref != null && t.ref.type != null) return t.ref.type;
+        return new CType(CType.VT_INT, null);
+    }
+
+    /** member access on a struct value/lvalue: adjust by field offset. */
+    private void genMemberAccess(String fname, boolean throughPtr) {
+        SValue v = gen.vtop();
+        CType st = v.type;
+        if (st.btype() != CType.VT_STRUCT || st.ref == null) return;
+        Sym f = fieldSym(st, fname);
+        if (f == null) { error("no member '" + fname + "'"); return; }
+        v.c += f.c;
+        v.type = f.type;
+        if ((v.r & 0x00ff) == Sym.VT_LOCAL) {
+            // local struct: member is a local at offset+field (still lvalue)
+        } else if ((v.r & Sym.VT_LVAL) != 0) {
+            // lvalue through base: fold offset into c
+        }
+    }
+
+    // ------------------------------------------------------- break/continue (M3)
+
+    private final java.util.List<int[]> loopStack = new java.util.ArrayList<>();
+    private final java.util.List<Integer> pendingBreaks = new java.util.ArrayList<>();
+
+    private void pushBreakContinue(int continueTarget) {
+        loopStack.add(new int[]{continueTarget, 0});
+    }
+    private void popLoop() { loopStack.remove(loopStack.size() - 1); }
+    private void genBreak() {
+        if (loopStack.isEmpty()) { error("break outside loop"); return; }
+        pendingBreaks.add(gen.enc.jmpRel32());
+    }
+    private void patchBreaks() {
+        for (int at : pendingBreaks) gen.gsym(at);
+        pendingBreaks.clear();
+    }
+    private void genContinue() {
+        if (loopStack.isEmpty()) { error("continue outside loop"); return; }
+        int target = loopStack.get(loopStack.size() - 1)[0];
+        int at = gen.enc.jmpRel32();
+        gen.enc.patchRel32(at, target);
     }
 
     // ------------------------------------------------------- expressions (tccgen.c precedence chain)
@@ -808,7 +976,36 @@ public final class Parser {
         String op = tok().text;
         if (tok().kind == CTok.Kind.PUNCT && isAssignOp(op)) {
             next();
+            if (gen != null && !"=".equals(op)) {
+                // compound: dup lvalue, load it, then op then store
+                SValue lv = gen.vtop();
+                SValue dup = gen.vpush();
+                dup.type = lv.type; dup.r = lv.r; dup.c = lv.c; dup.symId = lv.symId;
+                int r = gen.gv();
+                exprEq();
+                gen.genOpi(op.substring(0, 1));
+                genStoreBack(lv);
+                return;
+            }
             exprEq();
+            if (gen != null) genStoreBack(null);
+        }
+    }
+
+    /** store the rvalue on top into the lvalue below it, leaving the rvalue on top. */
+    private void genStoreBack(SValue compoundLv) {
+        SValue rv = gen.vtop();
+        SValue lv = compoundLv != null ? compoundLv : gen.vstack[gen.vtop - 2];
+        int r = gen.gv();
+        SValue target = lv;
+        gen.store(r, target);
+        // pop: rvalue stays, lvalue below removed
+        if (compoundLv == null) {
+            gen.vstack[gen.vtop - 2].type = rv.type;
+            gen.vstack[gen.vtop - 2].r = rv.r;
+            gen.vstack[gen.vtop - 2].c = rv.c;
+            gen.vstack[gen.vtop - 2].symId = rv.symId;
+            gen.vtop--;
         }
     }
 
@@ -832,38 +1029,179 @@ public final class Parser {
     private void binLevel(Runnable sub, String... ops) {
         sub.run();
         while (tok().kind == CTok.Kind.PUNCT) {
-            boolean hit = false;
-            for (String op : ops) if (tok().is(op)) { hit = true; break; }
-            if (!hit) break;
+            String op = null;
+            for (String o : ops) if (tok().is(o)) { op = o; break; }
+            if (op == null) return;
             next();
             sub.run();
+            if (gen != null) gen.genOpi(op);
         }
     }
 
-    private void exprLor()  { binLevel(this::exprLand, "||"); }
-    private void exprLand() { binLevel(this::exprOr, "&&"); }
+    private void exprLor() {
+        exprLand();
+        while (tok().is("||")) {
+            if (gen != null) {
+                // a || b  =>  a!=0 ? 1 : (b!=0)
+                next();
+                int jtrue = gen.gjmpIfNonZero();   // a popped; jumps when a!=0
+                exprLand();
+                int r = gen.gv();
+                gen.enc.test(r);
+                gen.enc.setcc(5, r);
+                gen.enc.movzxR32R8(r, r);          // (b != 0)
+                gen.freeRegPublic(r);
+                int jend = gen.enc.jmpRel32();
+                if (jtrue >= 0) {
+                    gen.gsym(jtrue);
+                    gen.vpushConst(new CType(CType.VT_INT, null), 1);
+                    gen.enc.patchRel32(jend, gen.label());
+                }
+            } else {
+                next();
+                exprLand();
+            }
+        }
+    }
+
+    private void exprLand() {
+        exprOr();
+        while (tok().is("&&")) {
+            if (gen != null) {
+                // a && b  =>  a==0 ? 0 : (b!=0)
+                next();
+                int jfalse = gen.gjmpIfZero();     // a popped; jumps when a==0
+                exprOr();
+                int r = gen.gv();
+                gen.enc.test(r);
+                gen.enc.setcc(5, r);
+                gen.enc.movzxR32R8(r, r);          // (b != 0)
+                gen.freeRegPublic(r);
+                int jend = gen.enc.jmpRel32();
+                if (jfalse >= 0) {
+                    gen.gsym(jfalse);
+                    gen.vpushConst(new CType(CType.VT_INT, null), 0);
+                    gen.enc.patchRel32(jend, gen.label());
+                }
+            } else {
+                next();
+                exprOr();
+            }
+        }
+    }
     private void exprOr()   { binLevel(this::exprXor, "|"); }
     private void exprXor()  { binLevel(this::exprAnd, "^"); }
     private void exprAnd()  { binLevel(this::exprCmpeq, "&"); }
-    private void exprCmpeq(){ binLevel(this::exprCmp, "==", "!="); }
-    private void exprCmp()  { binLevel(this::exprShift, "<", ">", "<=", ">="); }
+    private void exprCmpeq(){
+        exprCmp();
+        while (tok().kind == CTok.Kind.PUNCT) {
+            String op = null;
+            if (tok().is("==")) op = "==";
+            else if (tok().is("!=")) op = "!=";
+            if (op == null) return;
+            next();
+            exprCmp();
+            if (gen != null) gen.genCmpSet(op);
+        }
+    }
+    private void exprCmp()  {
+        exprShift();
+        while (tok().kind == CTok.Kind.PUNCT) {
+            String op = null;
+            if (tok().is("<")) op = "<";
+            else if (tok().is(">")) op = ">";
+            else if (tok().is("<=")) op = "<=";
+            else if (tok().is(">=")) op = ">=";
+            if (op == null) return;
+            next();
+            exprShift();
+            if (gen != null) gen.genCmpSet(op);
+        }
+    }
     private void exprShift(){ binLevel(this::exprSum, "<<", ">>"); }
-    private void exprSum()  { binLevel(this::exprProd, "+", "-"); }
+    private void exprSum()  {
+        exprProd();
+        while (tok().kind == CTok.Kind.PUNCT) {
+            String op = null;
+            if (tok().is("+")) op = "+";
+            else if (tok().is("-")) op = "-";
+            if (op == null) return;
+            next();
+            exprProd();
+            if (gen != null) {
+                SValue r = gen.vstack[gen.vtop - 1];
+                SValue l = gen.vstack[gen.vtop - 2];
+                boolean lp = l.type.isPtr() || l.type.isArray();
+                boolean rp = r.type.isPtr() || r.type.isArray();
+                if (lp && !rp) {
+                    gen.genPtrArith(l, r, elemSize(l.type), op.equals("-"));
+                    gen.vtop--;
+                    gen.vtop().type = l.type;
+                } else if (!lp && rp && op.equals("+")) {
+                    gen.genPtrArith(r, l, elemSize(r.type), false);
+                    // swap result into l's slot
+                    gen.vstack[gen.vtop - 2].type = r.type;
+                    gen.vstack[gen.vtop - 2].r = r.r;
+                    gen.vstack[gen.vtop - 2].c = r.c;
+                    gen.vstack[gen.vtop - 2].symId = r.symId;
+                    gen.vtop--;
+                } else if (lp && rp && op.equals("-")) {
+                    // pointer difference: (p - q) / elsize
+                    gen.genOpi("-");
+                    int el = elemSize(l.type);
+                    if (el > 1) {
+                        SValue esz = gen.vpushConst(new CType(CType.VT_LLONG, null), el);
+                        gen.genOpi("/");
+                    }
+                    gen.vtop().type = new CType(CType.VT_LLONG, null);
+                } else {
+                    gen.genOpi(op);
+                }
+            }
+        }
+    }
     private void exprProd() { binLevel(this::unary, "*", "/", "%"); }
 
     private void unary() {
         CTok t = tok();
         if (t.kind == CTok.Kind.PUNCT) {
             switch (t.text) {
-                case "!": case "~": case "-": case "+": case "&": case "*":
+                case "!": case "~": case "-": case "+":
                     next(); unary(); return;
+                case "&":
+                    next();
+                    unary();
+                    if (gen != null) {
+                        CType inner = gen.vtop().type;
+                        gen.genAddrOf(gen.vtop());
+                        CType pt = new CType(CType.VT_PTR, null);
+                        Sym ref = new Sym(null);
+                        ref.type = inner;
+                        pt.ref = ref;
+                        gen.vtop().type = pt;
+                    }
+                    return;
+                case "*":
+                    next();
+                    unary();
+                    if (gen != null) {
+                        gen.genDeref(gen.vtop());
+                        if (gen.vtop().type.isPtr() && gen.vtop().type.ref != null)
+                            gen.vtop().type = gen.vtop().type.ref.type;
+                    }
+                    return;
                 case "&&": // GNU label address (tccgen.c:6069 TOK_LAND)
                     next();
                     if (tok().kind != CTok.Kind.IDENT) error("label identifier expected");
                     next();
                     return;
-                case "++": case "--":
-                    next(); unary(); return;
+                case "++": case "--": {
+                    boolean inc = t.text.equals("++");
+                    next();
+                    unary();
+                    if (gen != null) gen.genIncDec(gen.vtop(), inc ? 1 : -1, true);
+                    return;
+                }
                 case "(":
                     // cast or parenthesized or statement-expression
                     if (toks.get(pos + 1).is("{")) {
@@ -964,23 +1302,51 @@ public final class Parser {
     private void postfixLoop() {
         for (;;) {
             if (accept("(")) {
-                // call
+                // call: fn value is on the stack; args follow
+                int nbArgs = 0;
                 if (!tok().is(")")) {
                     for (;;) {
                         exprEq();
+                        nbArgs++;
                         if (!accept(",")) break;
                     }
                 }
                 expect(")");
+                if (gen != null) gen.gfuncCall(nbArgs);
             } else if (accept("[")) {
+                // a[i] => *(a + i * elementsize)
                 expr();
                 expect("]");
+                if (gen != null) {
+                    CType at = gen.vstack[gen.vtop - 2].type;
+                    int elsize = elemSize(at);
+                    CType at0 = at;
+                    gen.genPtrArith(gen.vstack[gen.vtop - 2], gen.vstack[gen.vtop - 1], elsize, false);
+                    gen.vtop--;
+                    gen.genDeref(gen.vtop());
+                    gen.vtop().type = elemType(at0);
+                }
             } else if (accept(".")) {
-                if (tok().kind == CTok.Kind.IDENT) next(); else error("field name expected");
+                if (tok().kind == CTok.Kind.IDENT) {
+                    String fname = tok().text;
+                    next();
+                    if (gen != null) genMemberAccess(fname, false);
+                } else error("field name expected");
             } else if (accept("->")) {
-                if (tok().kind == CTok.Kind.IDENT) next(); else error("field name expected");
-            } else if (accept("++") || accept("--")) {
-                // postfix inc/dec
+                if (tok().kind == CTok.Kind.IDENT) {
+                    String fname = tok().text;
+                    next();
+                    if (gen != null) {
+                        gen.genDeref(gen.vtop());
+                        if (gen.vtop().type.isPtr() && gen.vtop().type.ref != null)
+                            gen.vtop().type = gen.vtop().type.ref.type;
+                        genMemberAccess(fname, true);
+                    }
+                } else error("field name expected");
+            } else if (tok().is("++") || tok().is("--")) {
+                boolean inc = tok().is("++");
+                next();
+                if (gen != null) gen.genIncDec(gen.vtop(), inc ? 1 : -1, false);
             } else break;
         }
     }
@@ -989,14 +1355,23 @@ public final class Parser {
         CTok t = tok();
         switch (t.kind) {
             case CINT: case CUINT: case CLONG: case CULONG: case CLLONG: case CULLONG:
-            case CFLOAT: case CDOUBLE: case CLDOUBLE: case CCHAR: case LCHAR:
+            case CCHAR: case LCHAR:
+                if (gen != null) {
+                    CType ct = intTypeOf(t);
+                    gen.vpushConst(ct, t.i);
+                }
                 next();
                 return;
+            case CFLOAT: case CDOUBLE: case CLDOUBLE:
+                next(); // float constants: later pass (M3 integer scope)
+                return;
             case STR: case LSTR:
+                if (gen != null) pushStringLiteral(t);
                 while (tok().kind == CTok.Kind.STR || tok().kind == CTok.Kind.LSTR) next(); // adjacency
                 return;
             case IDENT:
                 next();
+                if (gen != null) pushIdent(t.text);
                 return;
             case KEYWORD:
                 if (t.text.equals("__func__") || t.text.equals("__FUNCTION__") || t.text.equals("__PRETTY_FUNCTION__")) {
@@ -1013,6 +1388,83 @@ public final class Parser {
                 break;
         }
         error("expression expected, got '" + t.text + "'");
+    }
+
+    private static CType intTypeOf(CTok t) {
+        switch (t.kind) {
+            case CINT: return new CType(CType.VT_INT, null);
+            case CUINT: return new CType(CType.VT_INT | CType.VT_UNSIGNED, null);
+            case CLONG: return new CType(CType.VT_LLONG | CType.VT_LONG, null);
+            case CULONG: return new CType(CType.VT_LLONG | CType.VT_LONG | CType.VT_UNSIGNED, null);
+            case CLLONG: return new CType(CType.VT_LLONG, null);
+            case CULLONG: return new CType(CType.VT_LLONG | CType.VT_UNSIGNED, null);
+            case LCHAR: return new CType(CType.VT_INT, null);
+            default: return new CType(CType.VT_INT, null);
+        }
+    }
+
+    private SValue symToLvalue(Sym s) {
+        SValue v = gen.vpush();
+        v.type = s.type;
+        v.r = Sym.VT_LOCAL | Sym.VT_LVAL;
+        v.c = s.c;
+        gen.vtop--;
+        return v;
+    }
+
+    /** push an identifier reference (local, global, or extern function symbol). */
+    private void pushIdent(String name) {
+        // enum constants are compile-time integers, not symbols
+        Long enumVal = enumConsts.get(name);
+        if (enumVal != null) {
+            gen.vpushConst(new CType(CType.VT_INT | CType.VT_ENUM, null), enumVal);
+            return;
+        }
+        for (Map<String, Sym> scope : localStack) {
+            Sym s = scope.get(name);
+            if (s != null) { genPushSym(s, true); return; }
+        }
+        for (Map<String, Sym> scope : globalStack) {
+            Sym s = scope.get(name);
+            if (s != null) { genPushSym(s, false); return; }
+        }
+        // implicit extern function reference (C89 implicit decl; diagnostics come later)
+        SValue v = gen.vpush();
+        v.type = new CType(CType.VT_FUNC, null);
+        v.r = Sym.VT_CONST | Sym.VT_SYM;
+        v.c = 0;
+        v.symId = gen.st.addUndefSymbol(name);
+    }
+
+    private void genPushSym(Sym s, boolean local) {
+        SValue v = gen.vpush();
+        v.type = s.type;
+        if ((s.r & 0x00ff) == Sym.VT_LOCAL) {
+            v.r = Sym.VT_LOCAL | Sym.VT_LVAL;
+            v.c = s.c;
+        } else {
+            v.r = Sym.VT_CONST | Sym.VT_SYM | Sym.VT_LVAL;
+            v.c = 0;
+            v.symId = s.symId != 0 ? s.symId : gen.st.addUndefSymbol(s.name);
+        }
+    }
+
+    /** string literal → rodata symbol, pushed as char*. */
+    private void pushStringLiteral(CTok t) {
+        // merge adjacent literals: current token already decoded; adjacency handled by caller loop
+        String label = ".LC" + (strLitCount++);
+        int off = gen.st.rodata.size;
+        byte[] bytes = t.str != null ? t.str : new byte[]{0};
+        gen.st.rodata.add(bytes);
+        int id = gen.st.addDataSymbol(label, gen.st.rodata, off, false);
+        SValue v = gen.vpush();
+        CType ct = new CType(CType.VT_PTR, null);
+        ct.ref = new Sym(null);
+        ct.ref.type = new CType(CType.VT_BYTE, null);
+        v.type = ct;
+        v.r = Sym.VT_CONST | Sym.VT_SYM;
+        v.c = 0;
+        v.symId = id;
     }
 
     /** expr_const64 (tccgen.c): integer constant expression via the shared-stream evaluator. */

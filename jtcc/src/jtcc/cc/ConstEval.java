@@ -145,8 +145,7 @@ public final class ConstEval {
     private long primary() {
         CTok t = h.tok();
         switch (t.kind) {
-            case CINT: case CUINT: h.next(); System.err.println("DBG primary CINT text=" + t.text + " i=" + t.i); return t.i;
-            case CLONG: case CULONG: case CLLONG: case CULLONG: h.next(); System.err.println("DBG primary CLONG text=" + t.text + " i=" + t.i); return t.i;
+            case CINT: case CUINT: case CLONG: case CULONG: case CLLONG: case CULLONG:
             case CCHAR: case LCHAR: h.next(); return t.i;
             case IDENT: {
                 h.next();

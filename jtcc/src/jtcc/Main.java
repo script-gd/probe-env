@@ -80,13 +80,23 @@ public final class Main {
                 jtcc.cc.Parser p = new jtcc.cc.Parser(ctoks, new jtcc.cc.Parser.Diag() {
                     public void error(String f, int l, String m) { System.err.println(f + ":" + l + ": error: " + m); errors[0]++; }
                     public void warn(String f, int l, String m) { System.err.println(f + ":" + l + ": warning: " + m); }
-                }, new jtcc.cc.StubGen());
+                });
+                String outObj = null;
+                for (int i = 2; i < argv.length; i++) {
+                    if (argv[i].equals("-o") && i + 1 < argv.length) outObj = argv[++i];
+                }
+                if (outObj != null) {
+                    p.gen = new jtcc.backend.x86_64.VGen(new jtcc.backend.x86_64.GenState());
+                }
                 try {
                     p.compile();
                 } catch (jtcc.cc.Parser.ParseError e) {
                     // error already reported
                 }
                 if (errors[0] > 0) System.exit(1);
+                if (outObj != null) {
+                    p.gen.st.obj.write(Path.of(outObj));
+                }
                 break;
             }
             case "cmp": {

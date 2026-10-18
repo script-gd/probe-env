@@ -10,6 +10,7 @@ public final class SValue {
     public double d;              // float constant
     public int jtrue, jfalse;     // forward jump lists
     public Sym sym;               // referenced symbol
+    public int symId = -1;        // symbol table index (for VT_SYM codegen)
 
     public SValue(CType type) { this.type = type; }
 
