@@ -570,8 +570,13 @@ public final class VGen {
         X64Enc.R_EDI, X64Enc.R_ESI, X64Enc.R_EDX, X64Enc.R_ECX, X64Enc.R_R8, X64Enc.R_R9
     };
 
-    /** materialize an argument value into a register (lvalues are dereferenced). */
+    /** materialize an argument value into a register (lvalues are dereferenced, arrays decay). */
     private int materialize(SValue arg) {
+        // array decay: an array lvalue passed as a value becomes &a[0], not a load
+        if (arg.type.isArray() && (arg.r & Sym.VT_LVAL) != 0) {
+            genAddrOf(arg);
+            return arg.r & 0x00ff;
+        }
         if ((arg.r & Sym.VT_LVAL) != 0) {
             int r = (arg.r & 0x00ff) < Sym.VT_CONST ? arg.r & 0x00ff : -1;
             if (r < 0) r = allocTemp();
@@ -585,40 +590,38 @@ public final class VGen {
         return r;
     }
 
-    /** call fn with nbArgs args already on the value stack [fn, a1..aN]. Result in rax. */
+    /** spill the current value-stack top to the machine stack during arg parsing
+     *  (avoids RAX-clobbering when later args are evaluated). */
+    public void spillArg() {
+        int r = materialize(vtop());
+        enc.push(r);
+        freeReg(r); // the value now lives on the machine stack; release the register
+        vpop();
+    }
+
+    /** call fn with nbArgs args; the first min(6,nbArgs) were spilled to the machine stack
+     *  during parsing, args 7+ are on the value stack [fn, a7..aN]. */
     public void gfuncCall(int nbArgs) {
-        SValue fn = vstack[vtop - nbArgs - 1];
+        SValue fn = vstack[vtop - Math.max(0, nbArgs - 6) - 1];
+        // register args (first 6): popped from the machine stack (spilled during parsing)
+        int regArgs = Math.min(nbArgs, 6);
+        for (int i = regArgs - 1; i >= 0; i--) {
+            enc.pop(ARG_REGS[i]);
+            used[ARG_REGS[i]] = true; // live argument: the temp allocator must not clobber it
+        }
         // save all used temps (caller-saved incl. the arg registers)
         java.util.List<Integer> saved = new java.util.ArrayList<>();
         for (int r : TEMP_POOL) if (used[r]) { enc.push(r); saved.add(r); }
-        // SysV ordering: save temps, then the alignment pad, then stack args (7+) in
-        // reverse, then register args popped into arg registers. The callee's stack args
-        // then sit at [rsp+8..] untouched by the pad.
-        // 16-byte alignment pad goes right after the saved temps
+        // 16-byte alignment pad right after the saved temps
         int pushes = saved.size() + Math.max(0, nbArgs - 6);
         if ((pushes & 1) != 0) enc.push(X64Enc.R_EAX);
-        // evaluate stack args (7+) first in reverse
+        // args 7+: push onto the machine stack in reverse so arg7 lands at [rsp]
         for (int i = nbArgs - 1; i >= 6; i--) {
-            SValue arg = vstack[vtop - nbArgs + i];
+            SValue arg = vstack[vtop - (nbArgs - 6) + (i - 6)];
             int r = materialize(arg);
-            boolean temp = true;
-            // heuristic: only pool-allocated temps are freed immediately
             enc.push(r);
-            if (temp && arg.r != r) freeReg(r);
+            freeReg(r);
         }
-        // register args (first 6): push in order
-        java.util.List<Integer> argTemps = new java.util.ArrayList<>();
-        int regArgs = Math.min(nbArgs, 6);
-        for (int i = 0; i < regArgs; i++) {
-            SValue arg = vstack[vtop - nbArgs + i];
-            int r = materialize(arg);
-            argTemps.add(r);
-            enc.push(r);
-        }
-        // pop into SysV arg registers in reverse order
-        for (int i = regArgs - 1; i >= 0; i--) enc.pop(ARG_REGS[i]);
-        // args consumed by the call: free their temp registers
-        for (int r : argTemps) freeReg(r);
         // SysV: AL = number of SSE registers used for variadic calls (0 for integer-only)
         enc.binopRR(0x33, X64Enc.R_EAX, X64Enc.R_EAX); // xor eax, eax
         // call
@@ -636,8 +639,8 @@ public final class VGen {
         }
         // restore temps
         for (int i = saved.size() - 1; i >= 0; i--) enc.pop(saved.get(i));
-        // pop fn+args from the value stack, push result in rax
-        for (int i = 0; i < nbArgs + 1; i++) vtop--;
+        // pop fn from the value stack, push result in rax
+        vtop--;
         SValue res = vpush();
         res.type = new CType(CType.VT_INT, null); // M3: int returns for now
         res.r = X64Enc.R_EAX;

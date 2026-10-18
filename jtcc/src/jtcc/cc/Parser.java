@@ -673,7 +673,7 @@ public final class Parser {
                 int sz = Math.max(1, jtcc.backend.x86_64.VGen.typeSize(sym.type));
                 gen.loc = (gen.loc - sz) & -Math.max(1, alignOf(sym.type)); // size then align (tcc layout)
                 sym.r = Sym.VT_LOCAL | Sym.VT_LVAL;
-                sym.c = gen.loc;
+                sym.c = gen.loc; if (System.getenv("JTCC_DBG_LAYOUT") != null) System.err.println("DBG layout " + sym.name + " c=" + sym.c + " sz=" + sz);
                 localStack.peek().put(sym.name, sym);
                 if (accept("=")) {
                     skipInitializer();
@@ -875,9 +875,59 @@ public final class Parser {
                 }
                 return;
             }
-            case "switch": next(); expect("("); expr(); expect(")"); statement(); return;
-            case "case": next(); exprConst64(); if (accept("...")) exprConst64(); expect(":"); statement(); return;
-            case "default": next(); expect(":"); statement(); return;
+            case "switch": {
+                next(); expect("("); expr(); expect(")");
+                if (gen != null) {
+                    int switchReg = gen.gv();
+                    int dispatch = gen.enc.jmpRel32();
+                    switchStack.add(new SwitchCtx(switchReg, dispatch));
+                    pushBreakContinue(-1);
+                    statement();
+                    SwitchCtx ctx = switchStack.remove(switchStack.size() - 1);
+                    // body falls through to switch end; the routing chain lives after it
+                    int end = gen.enc.jmpRel32();
+                    // dispatch compare chain
+                    gen.gsym(dispatch);
+                    for (int[] c : ctx.cases) {
+                        gen.enc.movImm32SignExt(0, c[0]); // rax = case value
+                        gen.enc.rex(true, 0, 0, ctx.reg);
+                        gen.st.g(0x39); // cmp ctx.reg, rax
+                        gen.enc.modrmRR(0, ctx.reg);
+                        int je = gen.enc.jccRel32(4); // je case label
+                        gen.enc.patchRel32(je, c[1]);
+                    }
+                    if (ctx.defaultLabel >= 0) {
+                        int jd = gen.enc.jmpRel32();
+                        gen.enc.patchRel32(jd, ctx.defaultLabel);
+                    }
+                    gen.enc.patchRel32(end, gen.label());
+                    popLoop();
+                    patchBreaks();
+                } else {
+                    statement();
+                }
+                return;
+            }
+            case "case": {
+                next();
+                long v = exprConst64();
+                if (accept("...")) exprConst64(); // case ranges: later
+                expect(":");
+                if (gen != null && !switchStack.isEmpty()) {
+                    int lbl = gen.label();
+                    switchStack.get(switchStack.size() - 1).cases.add(new int[]{(int) v, lbl});
+                }
+                statement();
+                return;
+            }
+            case "default": {
+                next(); expect(":");
+                if (gen != null && !switchStack.isEmpty()) {
+                    switchStack.get(switchStack.size() - 1).defaultLabel = gen.label();
+                }
+                statement();
+                return;
+            }
             case "break":
                 next();
                 if (gen != null) genBreak();
@@ -978,6 +1028,17 @@ public final class Parser {
         }
     }
 
+    // ------------------------------------------------------- switch (M3)
+
+    private static final class SwitchCtx {
+        final int reg;
+        final int dispatch;
+        final java.util.List<int[]> cases = new java.util.ArrayList<>();
+        int defaultLabel = -1;
+        SwitchCtx(int reg, int dispatch) { this.reg = reg; this.dispatch = dispatch; }
+    }
+    private final java.util.List<SwitchCtx> switchStack = new java.util.ArrayList<>();
+
     // ------------------------------------------------------- break/continue (M3)
 
     private final java.util.List<int[]> loopStack = new java.util.ArrayList<>();
@@ -1059,10 +1120,33 @@ public final class Parser {
 
     private void exprCond() { // ternary
         exprLor();
-        if (accept("?")) {
-            expr();
-            expect(":");
-            exprCond();
+        if (tok().is("?")) {
+            next();
+            if (gen != null) {
+                int jfalse = gen.gjmpIfZero();   // condition consumed
+                // true branch: value into a temp register r
+                expr();
+                int r = gen.gv();
+                int jend = gen.enc.jmpRel32();
+                expect(":");
+                gen.gsym(jfalse);
+                exprCond(); // false branch: move its value into the SAME register r
+                int r2 = gen.gv();
+                if (r2 != r) {
+                    gen.enc.rex(true, r2, 0, r);
+                    gen.st.g(0x89);
+                    gen.enc.modrmRR(r2, r);
+                    gen.freeRegPublic(r2);
+                }
+                gen.enc.patchRel32(jend, gen.label());
+                // collapse the two branch slots into one result slot holding r
+                gen.vtop--;
+                gen.vtop().r = r;
+            } else {
+                expr();
+                expect(":");
+                exprCond();
+            }
         }
     }
 
@@ -1342,12 +1426,14 @@ public final class Parser {
     private void postfixLoop() {
         for (;;) {
             if (accept("(")) {
-                // call: fn value is on the stack; args follow
+                // call: fn value is on the stack; args follow; first 6 are spilled to the
+                // machine stack as they're parsed (avoids RAX clobbering between args)
                 int nbArgs = 0;
                 if (!tok().is(")")) {
                     for (;;) {
                         exprEq();
                         nbArgs++;
+                        if (gen != null && nbArgs <= 6) gen.spillArg();
                         if (!accept(",")) break;
                     }
                 }
