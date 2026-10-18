@@ -79,7 +79,8 @@ public final class CTokenizer {
         char ch = s.charAt(i);
         int start = i;
         char t0 = ch;
-        if (i + 1 < s.length()) { i++; ch = s.charAt(i); }
+        i++;
+        ch = i < s.length() ? s.charAt(i) : 0;
         if (t0 != '.') intDigits.append(t0);
         if (t0 == '0' && (ch == 'x' || ch == 'X' || ch == 'b' || ch == 'B')) {
             intDigits.setLength(0);

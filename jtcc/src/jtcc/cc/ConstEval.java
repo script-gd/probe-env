@@ -19,6 +19,7 @@ public final class ConstEval {
         int sizeofConst();           // sizeof operand parsing lives in the Parser
         Long constBuiltin(String name); // __builtin_* / _Generic in const contexts, null if N/A
         long constParenOrCast();     // '(' in const ctx: cast vs parenthesized expr (Parser)
+        long tryOffsetof();          // offsetof pattern &((T*)0)->field; MIN_VALUE if not matched
     }
 
     private final Host h;
@@ -48,6 +49,7 @@ public final class ConstEval {
             if (op == null) return a;
             h.next();
             long b = sub.run();
+            long l = a;
             a = apply(op, a, b);
         }
     }
@@ -96,7 +98,13 @@ public final class ConstEval {
         else if (t.is("~")) { h.next(); v = ~unary(); }
         else if (t.is("-")) { h.next(); v = -unary(); }
         else if (t.is("+")) { h.next(); v = unary(); }
-        else if (t.is("&") || t.is("*") || t.is("++") || t.is("--")) { h.next(); unary(); v = 0; } // value unknown in const ctx
+        else if (t.is("&")) {
+            h.next();
+            long off = h.tryOffsetof();
+            if (off != Long.MIN_VALUE) v = off;
+            else { unary(); v = 0; }
+        }
+        else if (t.is("*") || t.is("++") || t.is("--")) { h.next(); unary(); v = 0; } // value unknown in const ctx
         else if (t.is("(")) {
             h.next();
             v = h.constParenOrCast();
@@ -137,8 +145,8 @@ public final class ConstEval {
     private long primary() {
         CTok t = h.tok();
         switch (t.kind) {
-            case CINT: case CUINT: h.next(); return t.i;
-            case CLONG: case CULONG: case CLLONG: case CULLONG: h.next(); return t.i;
+            case CINT: case CUINT: h.next(); System.err.println("DBG primary CINT text=" + t.text + " i=" + t.i); return t.i;
+            case CLONG: case CULONG: case CLLONG: case CULLONG: h.next(); System.err.println("DBG primary CLONG text=" + t.text + " i=" + t.i); return t.i;
             case CCHAR: case LCHAR: h.next(); return t.i;
             case IDENT: {
                 h.next();

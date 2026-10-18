@@ -31,6 +31,14 @@ public final class Parser {
     private final Deque<Map<String, Sym>> localStack = new ArrayDeque<>();
     private final Map<String, Sym> typedefs = new HashMap<>();      // typedef names (global for now)
     private final Map<String, Sym> structTags = new HashMap<>();    // struct/union/enum tags
+    private int blockDepth;
+    /** C block scoping for struct tags: on block exit, tags defined inside go out of
+     *  scope (and shadowed outer definitions are restored). Mirrors tcc local_scope. */
+    private static final class StructScope {
+        final java.util.Set<String> added = new java.util.HashSet<>();
+        final Map<String, Sym> shadowed = new HashMap<>();
+    }
+    private final Deque<StructScope> structScopes = new ArrayDeque<>();
     private final List<SValue> vstack = new ArrayList<>();
     private int vtop; // index of top
 
@@ -65,6 +73,7 @@ public final class Parser {
 
     /** parse_btype (tccgen.c:4752): base type specifiers. Returns true if a type was found. */
     private boolean parseBtype(CType type, Sym fa /* attr acc */, boolean ignoreLabel) {
+        boolean fromTypedef = false; // type came from a typedef name: skip scalar normalization
         // typedef name?
         CTok t = tok();
         if (t.kind == CTok.Kind.IDENT) {
@@ -73,6 +82,7 @@ public final class Parser {
                 next();
                 type.t = td.type.t & ~(CType.VT_STORAGE | CType.VT_QUAL);
                 type.ref = td.type.ref;
+                fromTypedef = true;
                 return true;
             }
         }
@@ -187,6 +197,7 @@ public final class Parser {
                 type.t &= CType.VT_STORAGE | CType.VT_QUAL;
                 type.t |= td.type.t & ~(CType.VT_STORAGE | CType.VT_QUAL);
                 type.ref = td.type.ref;
+                fromTypedef = true;
                 done = false;
             }
         }
@@ -195,6 +206,7 @@ public final class Parser {
             if ((type.t & (CType.VT_QUAL)) != 0 || sawSpec) { type.t |= CType.VT_INT; return true; }
             return false;
         }
+        if (fromTypedef) return true; // typedef-resolved type: no scalar normalization
         // struct/enum set their own btype via refs; only scalar specifiers go through bt
         boolean composite = (type.t & CType.VT_BTYPE) == CType.VT_STRUCT
                 || (type.t & CType.VT_STRUCT_MASK) == CType.VT_ENUM;
@@ -202,34 +214,194 @@ public final class Parser {
         if (bt < 0) bt = CType.VT_INT;
         type.t &= ~(CType.VT_BTYPE | CType.VT_UNSIGNED | CType.VT_LONG);
         type.t |= bt;
-        if (bt == CType.VT_INT && isLong) type.t |= CType.VT_LONG;
+        // LP64 normalization (tccgen.c:5016): `long` on 64-bit targets is VT_LLONG|VT_LONG
+        if (bt == CType.VT_INT && isLong) { type.t = (type.t & ~CType.VT_BTYPE) | CType.VT_LLONG; type.t |= CType.VT_LONG; }
+        if (bt == CType.VT_LLONG && isLong) type.t |= CType.VT_LONG;
         if (bt == CType.VT_DOUBLE && isLong) { type.t = (type.t & ~CType.VT_BTYPE) | CType.VT_LDOUBLE; }
         if (signSet && sign) type.t |= CType.VT_UNSIGNED;
         return true;
     }
 
     private void parseStructRef(CType type, boolean isUnion) {
-        // struct [__attribute__((...))] [name] [{ fields }]
+        // struct_decl (tccgen.c:4476): struct [attr] [tag] [{ fields }]
         while (tok().is("__attribute") || tok().is("__attribute__")) { next(); parseAttribute(); }
         CTok t = tok();
         String tag = null;
         if (t.kind == CTok.Kind.IDENT) { tag = t.text; next(); }
         while (tok().is("__attribute") || tok().is("__attribute__")) { next(); parseAttribute(); }
-        if (accept("{")) {
-            // TODO(tccgen.c:4476): full struct_decl with fields
-            int depth = 1;
-            while (depth > 0 && tok().kind != CTok.Kind.EOF) {
-                if (accept("{")) depth++;
-                else if (accept("}")) depth--;
-                else next();
+
+        Sym s = null;
+        if (tag != null) {
+            s = structTags.get(tag);
+            if (s != null && tok().is("{") && s.c >= 0 && structScopes.peek() != null
+                    && structScopes.peek().added.contains(tag))
+                error("struct/union '" + tag + "' already defined in this scope");
+            if (s != null && tok().is("{") && s.c >= 0 && structScopes.peek() != null
+                    && !structScopes.peek().added.contains(tag)) {
+                // shadow the outer definition in this deeper scope (restored at block exit)
+                structScopes.peek().shadowed.putIfAbsent(tag, s);
+                structScopes.peek().added.add(tag);
+                s = null;
+            }
+        } else {
+            if (!tok().is("{") && !tok().is(";")) error("struct/union name expected");
+        }
+        if (s == null) {
+            s = new Sym(tag);
+            s.c = -1; // undefined size (forward ref)
+            s.r = 0;  // default alignment
+            if (tag != null) {
+                structTags.put(tag, s);
+                if (structScopes.peek() != null) structScopes.peek().added.add(tag);
             }
         }
-        while (tok().is("__attribute") || tok().is("__attribute__")) { next(); parseAttribute(); }
-        Sym ref = structTags.get(tag);
-        if (ref == null) { ref = new Sym(tag); structTags.put(tag == null ? "" : tag, ref); }
         type.t &= ~(CType.VT_BTYPE | CType.VT_STRUCT_MASK);
         type.t |= CType.VT_STRUCT | (isUnion ? CType.VT_UNION : 0);
-        type.ref = ref;
+        type.ref = s;
+
+        if (accept("{")) {
+            if (s.c >= 0) error("struct/union '" + tag + "' already defined");
+            s.c = -2;
+            Sym first = null, last = null;
+            while (!tok().is("}")) {
+                if (tok().is("_Static_assert")) {
+                    next(); expect("(");
+                    long v = exprConst64();
+                    expect(",");
+                    while (tok().kind == CTok.Kind.STR || tok().kind == CTok.Kind.LSTR) next();
+                    expect(")"); expect(";");
+                    if (v == 0) warn("static assertion not provable in parse-only mode (M2); exact evaluation in M3");
+                    continue;
+                }
+                CType btype = new CType();
+                if (!parseBtype(btype, null, false)) { expect(";"); continue; }
+                for (;;) {
+                    String fname = null;
+                    int bitSize = -1;
+                    CType ftype = new CType(btype);
+                    if (!tok().is(":")) {
+                        if (!tok().is(";")) {
+                            StringBuilder fn = new StringBuilder();
+                            typeDecl(ftype, fn, TYPE_DIRECT);
+                            fname = fn.length() == 0 ? null : fn.toString();
+                        }
+                        if (fname == null && ftype.btype() != CType.VT_STRUCT) {
+                            // anonymous struct/union member needs a struct type
+                            if (ftype.btype() != CType.VT_STRUCT) error("identifier expected");
+                        }
+                        int al;
+                        if (typeSize(ftype) < 0) {
+                            // incomplete type: allow flexible array member at the end
+                            if (!isUnion && ftype.isArray() && first != null) { /* flexible */ }
+                            else if (!tok().is(";")) error("field has incomplete type");
+                        }
+                        if (ftype.isFunc() || ftype.btype() == CType.VT_VOID)
+                            error("invalid type for field");
+                    }
+                    if (accept(":")) {
+                        bitSize = (int) exprConst64();
+                        if (bitSize < 0) error("negative width in bit-field");
+                        if (fname != null && bitSize == 0) error("zero width for bit-field");
+                        while (tok().is("__attribute") || tok().is("__attribute__")) { next(); parseAttribute(); }
+                    }
+                    int fsize = typeSize(ftype);
+                    if (bitSize >= 0) {
+                        int bt = ftype.btype();
+                        if (bt != CType.VT_INT && bt != CType.VT_BYTE && bt != CType.VT_SHORT
+                                && bt != CType.VT_BOOL && bt != CType.VT_LLONG)
+                            error("bitfields must have scalar type");
+                        if (bitSize > fsize * 8) error("width of bit-field exceeds its type");
+                        if (bitSize != fsize * 8) {
+                            if (bitSize == 64) error("field width 64 not implemented");
+                            ftype.t = (ftype.t & ~CType.VT_STRUCT_MASK) | CType.VT_BITFIELD
+                                    | (bitSize << (CType.VT_STRUCT_SHIFT + 6));
+                        }
+                    }
+                    if (fname == null && (ftype.btype() == CType.VT_STRUCT || bitSize >= 0))
+                        fname = ""; // anonymous member marker
+                    if (fname != null) {
+                        Sym f = new Sym(fname);
+                        f.type = ftype;
+                        f.a = new Sym.SymAttr();
+                        if (first == null) first = f; else last.next = f;
+                        last = f;
+                    }
+                    if (tok().is(";") || tok().kind == CTok.Kind.EOF) break;
+                    expect(",");
+                }
+                expect(";");
+            }
+            expect("}");
+            while (tok().is("__attribute") || tok().is("__attribute__")) { next(); parseAttribute(); }
+            s.next = first;
+            structLayout(s, isUnion);
+        }
+    }
+
+    /** struct_layout (tccgen.c:4217): compute field offsets and total size/alignment (PCC). */
+    private void structLayout(Sym s, boolean isUnion) {
+
+        int offset = 0, maxAlign = 1, c = 0;
+        for (Sym f = s.next; f != null; f = f.next) {
+            int size = typeSize(f.type);
+            int align = alignOf(f.type);
+            if (f.a.aligned > 0) align = 1 << (f.a.aligned - 1);
+            if (isUnion) {
+                f.c = 0;
+                if (size > c) c = size;
+                if (align > maxAlign) maxAlign = align;
+            } else {
+                c = (c + align - 1) & -align;
+                f.c = c;
+                if (size > 0) c += size;
+                if (align > maxAlign) maxAlign = align;
+            }
+        }
+        s.c = isUnion ? c : (c + maxAlign - 1) & -maxAlign;
+        s.r = maxAlign;
+    }
+
+    /** type_size (tccgen.c:3502): bytes of a type; negative when incomplete. */
+    int typeSize(CType type) {
+        switch (type.btype()) {
+            case CType.VT_STRUCT: {
+                Sym s = type.ref;
+                return s == null ? -1 : s.c;
+            }
+            case CType.VT_PTR: {
+                if (type.isArray()) {
+                    Sym s = type.ref;
+                    if (s.c < 0) return -1;
+                    int ts = typeSize(s.type);
+                    return ts < 0 ? -1 : ts * s.c;
+                }
+                return 8;
+            }
+            case CType.VT_LDOUBLE: return 16;
+            case CType.VT_DOUBLE: case CType.VT_LLONG: return 8;
+            case CType.VT_INT: case CType.VT_FLOAT: return 4;
+            case CType.VT_SHORT: return 2;
+            default: return 1; // char, void, function, _Bool
+        }
+    }
+
+    /** alignment of a type (tcc type_size's *a): arrays align as their element type. */
+    int alignOf(CType type) {
+        switch (type.btype()) {
+            case CType.VT_STRUCT: {
+                Sym s = type.ref;
+                return s == null || s.r == 0 ? 1 : s.r;
+            }
+            case CType.VT_PTR: {
+                if (type.isArray()) return alignOf(type.ref.type); // element alignment
+                return 8;
+            }
+            case CType.VT_LDOUBLE: return 16;
+            case CType.VT_DOUBLE: case CType.VT_LLONG: return 8;
+            case CType.VT_INT: case CType.VT_FLOAT: return 4;
+            case CType.VT_SHORT: return 2;
+            default: return 1;
+        }
     }
 
     private final Map<String, Long> enumConsts = new HashMap<>();
@@ -344,6 +516,7 @@ public final class Parser {
                 fn.fa = new Sym.FuncAttr();
                 fn.fa.funcType = 0; // FUNC_OLD
                 Sym first = null, last = null;
+                structScopes.push(new StructScope()); // parameter scope (tcc post_type scope boundary)
                 if (!tok().is(")")) {
                     CType pt = new CType();
                     if (parseBtype(pt, null, false)) {
@@ -382,6 +555,7 @@ public final class Parser {
                     }
                 }
                 expect(")");
+                popStructScope(); // tcc post_type pops the parameter scope after ')'
                 // function returning array quirk: int c()[]
                 if (accept("[")) { expect("]"); mkPointer(type); }
                 type.t &= ~CType.VT_QUAL;
@@ -455,8 +629,12 @@ public final class Parser {
             if ((type.t & CType.VT_TYPEDEF) != 0) {
                 if (sym.name != null) typedefs.put(sym.name, sym);
             } else if (dt.isFunc()) {
+                boolean krScope = false;
                 if (dt.ref.fa != null && dt.ref.fa.funcType == 0 && !tok().is("{") && !tok().is(";") && !tok().is(",")) {
                     // K&R: old-style parameter declarations before the body (tccgen.c decl0)
+                    // parsed in the function's own scope (struct tags there are function-local)
+                    structScopes.push(new StructScope());
+                    krScope = true;
                     CType pt = new CType();
                     while (parseBtype(pt, null, false)) {
                         do {
@@ -483,8 +661,10 @@ public final class Parser {
                 if (tok().is("{")) {
                     // function definition
                     parseFunction(sym);
+                    if (krScope) popStructScope();
                     return true;
                 }
+                if (krScope) popStructScope();
                 declareGlobal(sym);
             } else {
                 declareGlobal(sym);
@@ -518,6 +698,12 @@ public final class Parser {
         localStack.pop();
     }
 
+    private void popStructScope() {
+        StructScope sc = structScopes.pop();
+        for (String tag : sc.added) structTags.remove(tag);
+        structTags.putAll(sc.shadowed);
+    }
+
     private void skipInitializer() {
         if (accept("{")) {
             int depth = 1;
@@ -535,12 +721,16 @@ public final class Parser {
     // ------------------------------------------------------- statements (tccgen.c block())
 
     private void block(int flags) {
+        blockDepth++;
+        structScopes.push(new StructScope());
         expect("{");
         while (!tok().is("}")) {
             if (tok().kind == CTok.Kind.EOF) { error("unexpected EOF in block"); return; }
             statement();
         }
         next();
+        blockDepth--;
+        popStructScope(); // tags defined in this block go out of scope; restore shadows
     }
 
     private void statement() {
@@ -841,11 +1031,80 @@ public final class Parser {
         public int sizeofConst() { return Parser.this.sizeofConst(); }
         public Long constBuiltin(String name) { return Parser.this.constBuiltin(name); }
         public long constParenOrCast() { return Parser.this.constParenOrCast(); }
+        public long tryOffsetof() { return Parser.this.tryOffsetof(); }
     };
+
+    /** offsetof pattern in const contexts: & ( ( T * ) 0 ) -> field (tccdefs.h expansion). */
+    private long tryOffsetof() {
+        int save = pos;
+        long NA = Long.MIN_VALUE;
+        if (!accept("(")) { pos = save; return NA; }
+        if (!accept("(")) { pos = save; return NA; }
+        CType ct = new CType();
+        if (!parseBtype(ct, null, false)) { pos = save; return NA; }
+        // the '*' of (T *): use typeDecl for the pointer, then require ) 0 ) ->
+        typeDecl(ct, new StringBuilder(), TYPE_DIRECT | TYPE_ABSTRACT);
+        if (!ct.isPtr()) { pos = save; return NA; }
+        if (!accept(")")) { pos = save; return NA; }
+        if (tok().kind != CTok.Kind.CINT && tok().kind != CTok.Kind.CUINT
+                && tok().kind != CTok.Kind.CLONG && tok().kind != CTok.Kind.CULONG
+                && tok().kind != CTok.Kind.CLLONG && tok().kind != CTok.Kind.CULLONG) { pos = save; return NA; }
+        if (tok().i != 0) { pos = save; return NA; }
+        next();
+        if (!accept(")")) { pos = save; return NA; }
+        CType st = ct.ref.type; // pointee
+        long off = 0;
+        while (accept("->") || accept(".")) {
+            if (tok().kind != CTok.Kind.IDENT) { pos = save; return NA; }
+            String fname = tok().text; next();
+            long seg = fieldOff(st, fname);
+            if (seg < 0) { pos = save; return NA; }
+            off += seg;
+            Sym f = fieldSym(st, fname);
+            if (f == null) { pos = save; return NA; }
+            st = f.type;
+        }
+        return off;
+    }
+
+    /** direct+anonymous field lookup, returns the field for type continuation. */
+    private Sym fieldSym(CType st, String fname) {
+        if (st.btype() != CType.VT_STRUCT || st.ref == null || st.ref.c < 0) return null;
+        for (Sym f = st.ref.next; f != null; f = f.next)
+            if (fname.equals(f.name)) return f;
+        for (Sym f = st.ref.next; f != null; f = f.next)
+            if (f.type.btype() == CType.VT_STRUCT && (f.name == null || f.name.isEmpty())) {
+                Sym r = fieldSym(f.type, fname);
+                if (r != null) return r;
+            }
+        return null;
+    }
+
+    /** field offset descending into anonymous struct/union members (C11). */
+    private long fieldOff(CType st, String fname) {
+        if (st.btype() != CType.VT_STRUCT || st.ref == null || st.ref.c < 0) return -1;
+        for (Sym f = st.ref.next; f != null; f = f.next)
+            if (fname.equals(f.name)) return f.c;
+        // anonymous struct/union members (marked with empty name)
+        for (Sym f = st.ref.next; f != null; f = f.next) {
+            if (f.type.btype() == CType.VT_STRUCT && (f.name == null || f.name.isEmpty())) {
+                long sub = fieldOff(f.type, fname);
+                if (sub >= 0) return f.c + sub;
+            }
+        }
+        return -1;
+    }
 
     /** '(' in a constant expression: (typename) unary-op | (expr). Value is best-effort. */
     private long constParenOrCast() {
         CType ct = new CType();
+        if (tok().is("{")) {
+            // GNU statement expression ({...}) in const context: parse, value unknown
+            next();
+            while (!tok().is("}")) statement();
+            expect("}"); expect(")");
+            return 0;
+        }
         if (parseBtype(ct, null, false)) {
             typeDecl(ct, new StringBuilder(), TYPE_DIRECT | TYPE_ABSTRACT);
             expect(")");
@@ -918,8 +1177,13 @@ public final class Parser {
             expect(")");
             return sizeOfType(ct);
         }
-        // expression operand: parse with the real expression machinery (casts, ->, calls)
+        // expression operand: the offsetof-pattern member type ((T*)0)->field is exact;
+        // other expressions degrade until M3 type inference
         if (paren) {
+            int save = pos;
+            long msz = tryMemberSizeof();
+            if (msz >= 0) return (int) msz;
+            pos = save;
             expr();
             expect(")");
         } else {
@@ -928,21 +1192,40 @@ public final class Parser {
         return 4; // approximate expression size until M3 type inference
     }
 
-    /** type_size subset for constant contexts; exact for scalars/ptr/arrays of known base. */
-    int sizeOfType(CType t) {
-        switch (t.btype()) {
-            case CType.VT_BOOL: case CType.VT_BYTE: return 1;
-            case CType.VT_SHORT: return 2;
-            case CType.VT_INT: return 4;
-            case CType.VT_LLONG: return 8;
-            case CType.VT_FLOAT: return 4;
-            case CType.VT_DOUBLE: return 8;
-            case CType.VT_LDOUBLE: return 16;
-            case CType.VT_PTR: return 8;
-            case CType.VT_FUNC: return 8;
-            case CType.VT_VOID: return 1; // GNU sizeof(void)=1
-            case CType.VT_STRUCT: return -1; // layout needs M3
+    /** sizeof pattern ((T*)0)->a.b.c: size of the last field's type (fixture layout asserts). */
+    private long tryMemberSizeof() {
+        int save = pos;
+        long NA = -1;
+        if (!accept("(")) { pos = save; return NA; }
+        if (!accept("(")) { pos = save; return NA; }
+        CType ct = new CType();
+        if (!parseBtype(ct, null, false)) { pos = save; return NA; }
+        typeDecl(ct, new StringBuilder(), TYPE_DIRECT | TYPE_ABSTRACT);
+        if (!ct.isPtr()) { pos = save; return NA; }
+        if (!accept(")")) { pos = save; return NA; }
+        if (tok().kind != CTok.Kind.CINT && tok().kind != CTok.Kind.CUINT
+                && tok().kind != CTok.Kind.CLONG && tok().kind != CTok.Kind.CULONG
+                && tok().kind != CTok.Kind.CLLONG && tok().kind != CTok.Kind.CULLONG) { pos = save; return NA; }
+        if (tok().i != 0) { pos = save; return NA; }
+        next();
+        if (!accept(")")) { pos = save; return NA; }
+        CType st = ct.ref.type;
+        Sym last = null;
+        while (accept("->") || accept(".")) {
+            if (tok().kind != CTok.Kind.IDENT) { pos = save; return NA; }
+            String fname = tok().text; next();
+            last = fieldSym(st, fname);
+            if (last == null) { pos = save; return NA; }
+            st = last.type;
         }
-        return 4;
+        if (last == null) { pos = save; return NA; }
+        if (!accept(")")) { pos = save; return NA; } // the sizeof closing paren
+        return typeSize(last.type);
+    }
+
+    /** type_size for constant contexts: delegates to the layout-aware typeSize. */
+    int sizeOfType(CType t) {
+        int sz = typeSize(t);
+        return sz < 0 ? -1 : sz;
     }
 }
