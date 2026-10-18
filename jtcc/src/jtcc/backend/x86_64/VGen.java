@@ -48,6 +48,9 @@ public final class VGen {
     /** public wrapper for parser-side temp release after manual conversions. */
     public void freeRegPublic(int r) { freeReg(r); }
 
+    /** public wrapper: allocate a scratch temp register (parser-side merges). */
+    public int allocTempPublic() { return allocTemp(); }
+
     /** debug: dump currently-used temp registers. */
     public void dumpUsed(String tag) {
         StringBuilder sb = new StringBuilder();
@@ -328,6 +331,12 @@ public final class VGen {
 
     private int gvIn(SValue v) {
         int r = (v.r & 0x00ff) < Sym.VT_CONST ? v.r & 0x00ff : -1;
+        if ((v.r & Sym.VT_LVAL) != 0) {
+            // lvalue: the low byte holds the address register; load the pointed value
+            if (r < 0) r = allocTemp();
+            load(r, v);
+            return r;
+        }
         if (r >= 0) return r;
         int r2 = allocTemp();
         load(r2, v); // no stack juggling: the holder slot would alias the popped value
@@ -524,7 +533,7 @@ public final class VGen {
         if (elsize != 1) {
             int rn = (n.r & 0x00ff) < Sym.VT_CONST ? n.r & 0x00ff : -1;
             if (rn < 0) { rn = allocTemp(); load(rn, n); }
-            enc.rex(true, rn, 0, 0);
+            enc.rex(true, rn, 0, rn); // REX.R (dst) and REX.B (src) both cover rn
             st.g(0x69); enc.modrmRR(rn, rn); st.le32(elsize); // imul rn, rn, elsize
             n.r = rn;
         }
@@ -625,9 +634,13 @@ public final class VGen {
         // SysV: AL = number of SSE registers used for variadic calls (0 for integer-only)
         enc.binopRR(0x33, X64Enc.R_EAX, X64Enc.R_EAX); // xor eax, eax
         // call
-        if ((fn.r & Sym.VT_SYM) != 0) {
+        // direct call: a function symbol referenced by name (not a deref / function-pointer variable)
+        boolean directFunc = fn.type.isFunc()
+                && (fn.r & (Sym.VT_CONST | Sym.VT_SYM)) == (Sym.VT_CONST | Sym.VT_SYM);
+        if (directFunc) {
             enc.callRel32(fn.symId);
         } else {
+            // function pointer variable / computed callee: load its value, call through it
             int fr = (fn.r & 0x00ff) < Sym.VT_CONST ? fn.r & 0x00ff : -1;
             if (fr < 0) { fr = allocTemp(); load(fr, fn); }
             enc.callReg(fr);

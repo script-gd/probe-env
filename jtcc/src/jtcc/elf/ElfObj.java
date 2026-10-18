@@ -141,7 +141,7 @@ public final class ElfObj {
                 put32(b, 4, s.shType);
                 put64(b, 8, s.shFlags);
                 put64(b, 24, offsets[i]);
-                put64(b, 32, s.shType == Section.SHT_NOBITS ? 0 : s.size);
+                put64(b, 32, s.size);
                 put32(b, 40, link);
                 put32(b, 44, info);
                 put64(b, 48, s.shAddralign);

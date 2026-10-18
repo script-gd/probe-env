@@ -35,7 +35,7 @@ jobs:
         run: ./scripts/check-parse-accept.sh
 
       - name: M3 codegen gate (tests2 execution subset)
-        run: ./scripts/run-tests2-jtcc.sh 00_assignment 01_comment 04_for 07_function 08_while 09_do_while 12_hashdefine 13_integer_literals 14_if 15_recursion 16_nesting
+        run: ./scripts/run-tests2-jtcc.sh 00_assignment 01_comment 04_for 05_array 06_case 07_function 08_while 09_do_while 10_pointer 11_precedence 12_hashdefine 13_integer_literals 14_if 15_recursion 16_nesting 17_enum 19_pointer_arithmetic 20_pointer_comparison 25_quicksort 27_sizeof 30_hanoi 31_args 32_led 37_sprintf 38_multiple_array_index 42_function_pointer
 
       - name: Smoke-test the produced shared library
         run: python3 -c "import ctypes; ctypes.CDLL('tmp/tcc-ref/libprobe.so'); print('dlopen OK')"

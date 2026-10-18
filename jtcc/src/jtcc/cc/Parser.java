@@ -612,10 +612,11 @@ public final class Parser {
             expect(";");
             return true;
         }
-        CType type = new CType();
-        if (!parseBtype(type, null, false)) return false;
+        CType btype = new CType();
+        if (!parseBtype(btype, null, false)) return false;
         if (accept(";")) return true;
         for (;;) {
+            CType type = new CType(btype); // fresh copy per declarator: typeDecl mutates in place (tcc decl0)
             StringBuilder name = new StringBuilder();
             typeDecl(type, name, TYPE_DIRECT); // mutates `type` in place (tcc semantics)
             Sym sym = new Sym(name.length() == 0 ? null : name.toString());
@@ -694,8 +695,10 @@ public final class Parser {
                 if (accept("=")) {
                     // scalar constant initializers get real .data contents (M3)
                     if (gen != null && sym.symId != 0 && !tok().is("{") && tok().kind != CTok.Kind.STR && tok().kind != CTok.Kind.LSTR) {
-                        long v = exprConst64();
-                        writeGlobalInit(sym, v);
+                        if (!tryGlobalSymReloc(sym)) {
+                            long v = exprConst64();
+                            writeGlobalInit(sym, v);
+                        }
                     } else {
                         skipInitializer();
                     }
@@ -985,6 +988,33 @@ public final class Parser {
 
     private final Map<String, Integer> dataInitOff = new HashMap<>();
 
+    /** global init of the form `&name` / `name` where name is a function/global symbol:
+     *  emit a 64-bit relocation at the data slot instead of a scalar value. */
+    private boolean tryGlobalSymReloc(Sym sym) {
+        boolean addrOf = tok().is("&");
+        if (addrOf) next();
+        CTok t = tok(); // re-read after consuming '&'
+        if (t.kind != CTok.Kind.IDENT) { if (addrOf) pos--; return false; }
+        // resolve the identifier to a function symbol (global fn or extern fn)
+        String name = t.text;
+        Sym target = null;
+        for (Map<String, Sym> scope : globalStack) { target = scope.get(name); if (target != null) break; }
+        int tid = -1;
+        if (target != null && target.type.isFunc()) {
+            tid = target.symId != 0 ? target.symId : gen.st.addUndefSymbol(name);
+        } else if (target == null) {
+            // extern function (implicit decl)
+            tid = gen.st.addUndefSymbol(name);
+        }
+        if (tid < 0) { if (addrOf) pos--; return false; }
+        next();
+        Integer off = dataInitOff.get(sym.name);
+        if (off != null) {
+            gen.st.data.relocs.add(new jtcc.elf.Section.Reloc(off, tid, jtcc.elf.ElfObj.R_X86_64_64, 0));
+        }
+        return true;
+    }
+
     /** write a scalar constant into a global's .data slot. */
     private void writeGlobalInit(Sym sym, long v) {
         Integer off = dataInitOff.get(sym.name);
@@ -1124,24 +1154,24 @@ public final class Parser {
             next();
             if (gen != null) {
                 int jfalse = gen.gjmpIfZero();   // condition consumed
-                // true branch: value into a temp register r
+                // true branch: value spilled via push (no register held across the branches)
                 expr();
                 int r = gen.gv();
+                gen.enc.push(r);
+                gen.freeRegPublic(r);
                 int jend = gen.enc.jmpRel32();
                 expect(":");
-                gen.gsym(jfalse);
-                exprCond(); // false branch: move its value into the SAME register r
+                if (jfalse >= 0) gen.gsym(jfalse); // guard: -1 for constant-true conditions
+                exprCond(); // false branch
                 int r2 = gen.gv();
-                if (r2 != r) {
-                    gen.enc.rex(true, r2, 0, r);
-                    gen.st.g(0x89);
-                    gen.enc.modrmRR(r2, r);
-                    gen.freeRegPublic(r2);
-                }
+                gen.enc.push(r2); // balanced: both paths push exactly one value
+                gen.freeRegPublic(r2);
                 gen.enc.patchRel32(jend, gen.label());
-                // collapse the two branch slots into one result slot holding r
+                // merge: pop whichever value the executed branch pushed
+                int rr = gen.allocTempPublic();
+                gen.enc.pop(rr);
                 gen.vtop--;
-                gen.vtop().r = r;
+                gen.vtop().r = rr;
             } else {
                 expr();
                 expect(":");
@@ -1290,8 +1320,19 @@ public final class Parser {
         CTok t = tok();
         if (t.kind == CTok.Kind.PUNCT) {
             switch (t.text) {
-                case "!": case "~": case "-": case "+":
-                    next(); unary(); return;
+                case "!": case "~": case "-": case "+": {
+                    String uop = tok().text;
+                    next(); unary();
+                    if (gen != null) {
+                        switch (uop) {
+                            case "!": gen.genLnot(); gen.vtop().type = new CType(CType.VT_INT, null); break;
+                            case "~": gen.genNot(); break;
+                            case "-": gen.genNeg(); break;
+                            default: break; // unary +
+                        }
+                    }
+                    return;
+                }
                 case "&":
                     next();
                     unary();
@@ -1359,11 +1400,22 @@ public final class Parser {
                     if (paren && parseBtype(ct, null, false)) {
                         typeDecl(ct, new StringBuilder(), TYPE_DIRECT | TYPE_ABSTRACT);
                         expect(")");
+                        if (gen != null) gen.vpushConst(new CType(CType.VT_INT, null), sizeOfType(ct));
                     } else if (paren) {
                         expr();
                         expect(")");
+                        if (gen != null) {
+                            CType szt = gen.vtop().type;
+                            gen.vpop();
+                            gen.vpushConst(new CType(CType.VT_INT, null), sizeOfType(szt));
+                        }
                     } else {
                         unary();
+                        if (gen != null) {
+                            CType szt = gen.vtop().type;
+                            gen.vpop();
+                            gen.vpushConst(new CType(CType.VT_INT, null), sizeOfType(szt));
+                        }
                     }
                     return;
                 }
